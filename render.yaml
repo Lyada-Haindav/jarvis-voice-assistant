@@ -2,7 +2,7 @@ services:
   - type: web
     name: jarvis-voice-assistant
     runtime: node
-    plan: starter
+    plan: free
     buildCommand: npm install
     startCommand: npm start
     healthCheckPath: /api/config
