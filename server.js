@@ -5,7 +5,7 @@ const os = require("os");
 const path = require("path");
 const { exec, execFile } = require("child_process");
 
-const HOST = "127.0.0.1";
+const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
 const PORT = Number(process.env.PORT || 3000);
 const PUBLIC_DIR = path.join(__dirname, "static");
 const CONFIG_PATH = path.join(__dirname, "config", "assistant.config.json");
