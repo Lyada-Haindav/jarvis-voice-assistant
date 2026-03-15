@@ -9,6 +9,8 @@ services:
     envVars:
       - key: NODE_VERSION
         value: 20.18.0
+      - key: KOKORO_SERVER_TTS
+        value: "0"
       - key: OPENROUTER_MODEL
         value: openai/gpt-4o-mini
       - key: OPENROUTER_API_KEY

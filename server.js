@@ -271,7 +271,7 @@ function kokoroServerTtsEnabled() {
     return false;
   }
 
-  return !process.env.RENDER;
+  return true;
 }
 
 function loadDotEnv() {
