@@ -52,6 +52,7 @@ Public-device note:
 
 - the hosted app UI works across phones, tablets, and laptops
 - world knowledge and voice UI can run publicly in supported browsers
+- Render deploys use browser speech by default; server-side Kokoro TTS stays off unless you set `KOKORO_SERVER_TTS=1`
 - macOS-only device control, Shortcuts, WhatsApp desktop automation, and local app launching remain local-machine features and will not work the same way on Render
 
 ## What it can do

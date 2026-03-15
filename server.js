@@ -262,6 +262,18 @@ const state = {
 
 loadDotEnv();
 
+function kokoroServerTtsEnabled() {
+  if (process.env.KOKORO_SERVER_TTS === "1") {
+    return true;
+  }
+
+  if (process.env.KOKORO_SERVER_TTS === "0") {
+    return false;
+  }
+
+  return !process.env.RENDER;
+}
+
 function loadDotEnv() {
   if (!fs.existsSync(ENV_PATH)) {
     return;
@@ -571,6 +583,18 @@ function nativeTtsConfig() {
 }
 
 function publicTtsConfig() {
+  if (!kokoroServerTtsEnabled()) {
+    return {
+      provider: "browser",
+      femaleVoice: "",
+      maleVoice: "",
+      available: false,
+      status: "disabled",
+      error: "Server-side Kokoro TTS is disabled on this host.",
+      fallbackProvider: "browser"
+    };
+  }
+
   const available = state.kokoroStatus === "ready";
   return {
     provider: "kokoro_server",
@@ -2691,6 +2715,12 @@ async function loadKokoroModule() {
 }
 
 async function getKokoroTts() {
+  if (!kokoroServerTtsEnabled()) {
+    state.kokoroStatus = "disabled";
+    state.kokoroLastError = "Server-side Kokoro TTS is disabled on this host.";
+    throw new Error(state.kokoroLastError);
+  }
+
   if (!state.kokoroTtsPromise) {
     state.kokoroStatus = "loading";
     state.kokoroLastError = "";
@@ -2816,6 +2846,12 @@ async function warmKokoroVoices() {
 }
 
 function kickoffKokoroWarmup() {
+  if (!kokoroServerTtsEnabled()) {
+    state.kokoroStatus = "disabled";
+    state.kokoroLastError = "Server-side Kokoro TTS is disabled on this host.";
+    return Promise.resolve(null);
+  }
+
   if (!state.kokoroWarmupPromise) {
     state.kokoroWarmupPromise = getKokoroTts()
       .then(() => warmKokoroVoices())
