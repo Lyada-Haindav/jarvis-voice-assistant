@@ -254,6 +254,8 @@ const state = {
   sessionContext: createSessionContext(),
   kokoroModulePromise: null,
   kokoroTtsPromise: null,
+  kokoroWarmupPromise: null,
+  kokoroStatus: "idle",
   kokoroLastError: "",
   speechQueue: Promise.resolve()
 };
@@ -569,10 +571,15 @@ function nativeTtsConfig() {
 }
 
 function publicTtsConfig() {
+  const available = state.kokoroStatus === "ready";
   return {
     provider: "kokoro_server",
     femaleVoice: KOKORO_TTS_VOICES.female.label,
-    maleVoice: KOKORO_TTS_VOICES.male.label
+    maleVoice: KOKORO_TTS_VOICES.male.label,
+    available,
+    status: state.kokoroStatus,
+    error: available ? "" : state.kokoroLastError,
+    fallbackProvider: "browser"
   };
 }
 
@@ -2685,14 +2692,19 @@ async function loadKokoroModule() {
 
 async function getKokoroTts() {
   if (!state.kokoroTtsPromise) {
+    state.kokoroStatus = "loading";
+    state.kokoroLastError = "";
     state.kokoroTtsPromise = (async () => {
       const { KokoroTTS } = await loadKokoroModule();
-      return KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
+      const tts = await KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
         dtype: "q8",
         device: "cpu"
       });
+      state.kokoroStatus = "ready";
+      return tts;
     })().catch((error) => {
       state.kokoroLastError = error.message;
+      state.kokoroStatus = "error";
       state.kokoroTtsPromise = null;
       throw error;
     });
@@ -2709,17 +2721,28 @@ async function createKokoroSpeechAudio(text, voiceMode) {
     throw new Error("No text provided for speech.");
   }
 
-  const tts = await getKokoroTts();
-  const audio = await tts.generate(safeText, {
-    voice: voice.id,
-    speed: mode === "female" ? 1.0 : 0.98
-  });
+  try {
+    const tts = await getKokoroTts();
+    const audio = await tts.generate(safeText, {
+      voice: voice.id,
+      speed: mode === "female" ? 1.0 : 0.98
+    });
 
-  return {
-    buffer: Buffer.from(audio.toWav()),
-    contentType: "audio/wav",
-    voiceName: voice.label
-  };
+    state.kokoroStatus = "ready";
+    state.kokoroLastError = "";
+
+    return {
+      buffer: Buffer.from(audio.toWav()),
+      contentType: "audio/wav",
+      voiceName: voice.label
+    };
+  } catch (error) {
+    state.kokoroLastError = error.message;
+    state.kokoroStatus = "error";
+    state.kokoroTtsPromise = null;
+    state.kokoroWarmupPromise = null;
+    throw error;
+  }
 }
 
 async function createNativeSpeechAudio(text, voiceMode) {
@@ -2784,13 +2807,27 @@ function enqueueSpeechJob(job) {
 
 async function warmKokoroVoices() {
   try {
-    await Promise.all([
-      createKokoroSpeechAudio("Ready.", "female"),
-      createKokoroSpeechAudio("Ready.", "male")
-    ]);
+    await createKokoroSpeechAudio("Ready.", "female");
+    await createKokoroSpeechAudio("Ready.", "male");
   } catch (error) {
     state.kokoroLastError = error.message;
+    state.kokoroStatus = "error";
   }
+}
+
+function kickoffKokoroWarmup() {
+  if (!state.kokoroWarmupPromise) {
+    state.kokoroWarmupPromise = getKokoroTts()
+      .then(() => warmKokoroVoices())
+      .catch(() => {})
+      .finally(() => {
+        if (state.kokoroStatus !== "ready") {
+          state.kokoroWarmupPromise = null;
+        }
+      });
+  }
+
+  return state.kokoroWarmupPromise;
 }
 
 function whatsappUrl(phone, message) {
@@ -3538,6 +3575,20 @@ const server = http.createServer(async (request, response) => {
         return;
       }
 
+      if (state.kokoroStatus !== "ready") {
+        kickoffKokoroWarmup();
+        const statusNote =
+          state.kokoroStatus === "error" && state.kokoroLastError
+            ? `Kokoro is unavailable right now: ${state.kokoroLastError}`
+            : "Kokoro is still warming up on the server.";
+        sendJson(response, 503, {
+          reply: `${statusNote} Falling back to browser speech is recommended for now.`,
+          status: state.kokoroStatus,
+          fallbackProvider: "browser"
+        });
+        return;
+      }
+
       try {
         const audio = await enqueueSpeechJob(() => createSpeechAudio(text, voiceMode));
         response.writeHead(200, {
@@ -3547,7 +3598,7 @@ const server = http.createServer(async (request, response) => {
         });
         response.end(audio.buffer);
       } catch (error) {
-        sendJson(response, 500, {
+        sendJson(response, 503, {
           reply: `Kokoro speech failed: ${error.message}`
         });
       }
@@ -3572,6 +3623,4 @@ server.listen(PORT, HOST, () => {
   console.log(`Jarvis local assistant running at ${url}`);
 });
 
-getKokoroTts()
-  .then(() => warmKokoroVoices())
-  .catch(() => {});
+kickoffKokoroWarmup();

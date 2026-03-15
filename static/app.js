@@ -31,7 +31,9 @@ const state = {
   commandWindowUntil: 0,
   hasStartedRecognition: false,
   pendingSpeechText: "",
-  listeningResumeTimeout: null
+  listeningResumeTimeout: null,
+  serverTtsDisabled: false,
+  serverTtsError: ""
 };
 
 const dom = {
@@ -288,20 +290,20 @@ function updateRecognitionBadge() {
 }
 
 function updateVoiceBadge() {
-  if (state.config?.tts?.provider === "kokoro_server") {
+  if (activeTtsProvider() === "kokoro_server") {
     dom.voiceBadge.textContent =
       state.voiceMode === "female" ? "Kokoro Female" : "Kokoro Male";
     return;
   }
 
-  if (state.config?.tts?.provider === "native_mac") {
+  if (activeTtsProvider() === "native_mac") {
     dom.voiceBadge.textContent =
       state.voiceMode === "female" ? "Mac Female" : "Mac Male";
     return;
   }
 
   dom.voiceBadge.textContent =
-    state.voiceMode === "female" ? "Female Voice" : "Male Voice";
+    state.voiceMode === "female" ? "Browser Female" : "Browser Male";
 }
 
 function setMainLine(text) {
@@ -755,12 +757,52 @@ function voiceLabel(voice, fallbackLabel) {
   return voice.name;
 }
 
+function configuredServerProvider() {
+  return ["kokoro_server", "native_mac"].includes(state.config?.tts?.provider)
+    ? state.config.tts.provider
+    : "";
+}
+
+function activeTtsProvider() {
+  if (
+    configuredServerProvider() &&
+    !state.serverTtsDisabled &&
+    state.config?.tts?.available !== false
+  ) {
+    return state.config.tts.provider;
+  }
+
+  return "browser";
+}
+
+function serverTtsFallbackNote() {
+  const configuredProvider = configuredServerProvider();
+  const status = state.config?.tts?.status;
+  const errorMessage = state.serverTtsError || state.config?.tts?.error || "";
+
+  if (configuredProvider === "kokoro_server") {
+    if (status === "loading" || status === "idle") {
+      return "Kokoro is still warming up on the server, so Jarvis is using browser speech for now.";
+    }
+
+    if (errorMessage) {
+      return `Kokoro is unavailable right now, so Jarvis switched to browser speech. ${errorMessage}`;
+    }
+  }
+
+  if (configuredProvider === "native_mac" && errorMessage) {
+    return `Native server audio is unavailable right now, so Jarvis switched to browser speech. ${errorMessage}`;
+  }
+
+  return "Jarvis is using the clearest available female and male voices exposed by this browser.";
+}
+
 function usesServerAudio() {
-  return ["kokoro_server", "native_mac"].includes(state.config?.tts?.provider);
+  return ["kokoro_server", "native_mac"].includes(activeTtsProvider());
 }
 
 function updateVoiceLockSummary() {
-  if (state.config?.tts?.provider === "kokoro_server") {
+  if (activeTtsProvider() === "kokoro_server") {
     dom.voiceProviderName.textContent = "Kokoro Neural TTS";
     dom.femaleVoiceName.textContent =
       state.config.tts.femaleVoice || "Kokoro female voice";
@@ -771,7 +813,7 @@ function updateVoiceLockSummary() {
     return;
   }
 
-  if (state.config?.tts?.provider === "native_mac") {
+  if (activeTtsProvider() === "native_mac") {
     dom.voiceProviderName.textContent = "Native macOS TTS";
     dom.femaleVoiceName.textContent =
       state.config.tts.femaleVoice || "Native female voice";
@@ -785,8 +827,14 @@ function updateVoiceLockSummary() {
   dom.voiceProviderName.textContent = "Browser Speech";
   dom.femaleVoiceName.textContent = voiceLabel(state.femaleVoice, "No female voice found");
   dom.maleVoiceName.textContent = voiceLabel(state.maleVoice, "No male voice found");
-  dom.voiceNote.textContent =
-    "Jarvis is using the clearest available female and male voices exposed by this browser.";
+  dom.voiceNote.textContent = serverTtsFallbackNote();
+}
+
+function disableServerTts(error) {
+  state.serverTtsDisabled = true;
+  state.serverTtsError = String(error?.message || error || "").trim();
+  updateVoiceBadge();
+  updateVoiceLockSummary();
 }
 
 function lockPreferredVoices() {
@@ -1342,13 +1390,16 @@ async function speak(text, options = {}) {
         return;
       }
 
-      setStatus({
-        label: "Kokoro unavailable",
-        pill: "TTS Error",
-        note: "Kokoro could not generate speech right now. Try again in a moment."
-      });
-      setMainLine("Kokoro voice unavailable");
-      return;
+      disableServerTts(error);
+      if (!("speechSynthesis" in window)) {
+        setStatus({
+          label: "Speech output unavailable",
+          pill: "No TTS",
+          note: "Your browser does not expose speech synthesis."
+        });
+        setMainLine("Voice output unavailable");
+        return;
+      }
     }
   }
 
@@ -1938,6 +1989,8 @@ function rotateX(point, angle) {
 async function loadConfig() {
   const response = await fetch("/api/config");
   state.config = await response.json();
+  state.serverTtsDisabled = state.config?.tts?.available === false;
+  state.serverTtsError = state.config?.tts?.error || "";
   dom.assistantName.textContent = state.config.assistantName;
   updateVoiceBadge();
   updateVoiceLockSummary();
