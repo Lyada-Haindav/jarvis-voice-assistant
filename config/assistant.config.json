@@ -1,0 +1,67 @@
+{
+  "assistantName": "Jarvis",
+  "messageDelivery": "draft",
+  "knowledge": {
+    "enabled": true,
+    "provider": "auto",
+    "model": "gemini-2.5-flash",
+    "useGoogleSearch": true
+  },
+  "contacts": {
+    "dad": {
+      "displayName": "Dad",
+      "phone": "91XXXXXXXXXX",
+      "aliases": ["father", "papa"]
+    }
+  },
+  "apps": {
+    "whatsapp": "WhatsApp",
+    "chrome": "Google Chrome",
+    "safari": "Safari",
+    "spotify": "Spotify",
+    "terminal": "Terminal",
+    "vscode": "Visual Studio Code",
+    "settings": "System Settings"
+  },
+  "sites": {
+    "youtube": "https://www.youtube.com",
+    "github": "https://github.com",
+    "chatgpt": "https://chatgpt.com",
+    "gmail": "https://mail.google.com",
+    "whatsappweb": "https://web.whatsapp.com"
+  },
+  "folders": {
+    "downloads": "~/Downloads",
+    "desktop": "~/Desktop",
+    "documents": "~/Documents"
+  },
+  "spotify": {
+    "likedSongsUri": "spotify:collection:tracks"
+  },
+  "customActions": [
+    {
+      "phrase": "lock the screen",
+      "description": "lock the screen",
+      "command": "osascript -e 'tell application \"System Events\" to keystroke \"q\" using {control down, command down}'",
+      "requiresConfirmation": true
+    },
+    {
+      "phrase": "take a screenshot",
+      "description": "take an interactive screenshot",
+      "command": "screencapture -i ~/Desktop/jarvis-$(date +%Y%m%d-%H%M%S).png",
+      "requiresConfirmation": false
+    },
+    {
+      "phrase": "mute the volume",
+      "description": "mute the volume",
+      "command": "osascript -e 'set volume with output muted'",
+      "requiresConfirmation": false
+    },
+    {
+      "phrase": "unmute the volume",
+      "description": "unmute the volume",
+      "command": "osascript -e 'set volume without output muted'",
+      "requiresConfirmation": false
+    }
+  ]
+}

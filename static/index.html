@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Jarvis Voice Assistant</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="backdrop"></div>
+    <div class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Jarvis</p>
+          <h1 id="assistantName">Jarvis</h1>
+        </div>
+        <div class="status-pill" id="statusPill">Idle</div>
+      </header>
+
+      <main class="layout">
+        <section class="hero-panel">
+          <div class="scan-ring ring-one"></div>
+          <div class="scan-ring ring-two"></div>
+          <canvas id="globeCanvas" aria-hidden="true"></canvas>
+
+          <div class="center-copy">
+            <p class="center-label" id="centerLabel">Awaiting command</p>
+            <h2 id="assistantLine">Awaiting your voice</h2>
+            <p class="center-note" id="centerNote">
+              Say "Hey Jarvis" and speak naturally.
+            </p>
+          </div>
+
+          <div class="subtitle-rail" id="subtitleRail" aria-live="polite" aria-atomic="true">
+            <span class="subtitle-label">Jarvis</span>
+            <p class="subtitle-text" id="subtitleText"></p>
+          </div>
+
+          <aside class="orb-drawer" id="orbDrawer" aria-live="polite">
+            <div class="orb-drawer-header">
+              <div>
+                <p class="orb-drawer-label" id="drawerLabel">Display</p>
+                <h3 id="drawerTitle">Commands</h3>
+              </div>
+              <button id="closeDrawerButton" class="drawer-close" type="button">
+                Close
+              </button>
+            </div>
+            <div class="orb-drawer-content" id="drawerContent"></div>
+          </aside>
+        </section>
+
+        <aside class="control-stack">
+          <section class="card">
+            <div class="card-header">
+              <h3>Voice Control</h3>
+              <span class="mini-label" id="recognitionBadge">Mic off</span>
+            </div>
+
+            <div class="button-row">
+              <button id="startButton" class="primary">Start Voice</button>
+              <button id="stopButton">Stop</button>
+            </div>
+
+            <label class="toggle">
+              <input type="checkbox" id="handsFreeToggle" checked />
+              <span>Keep listening after each reply</span>
+            </label>
+
+            <form id="textCommandForm" class="text-command">
+              <label for="textCommand">Fallback text command</label>
+              <div class="text-row">
+                <input
+                  id="textCommand"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="open youtube"
+                />
+                <button type="submit" class="primary">Send</button>
+              </div>
+            </form>
+          </section>
+
+          <section class="card">
+            <div class="card-header">
+              <h3>Voice Style</h3>
+              <span class="mini-label" id="voiceBadge">Google Female</span>
+            </div>
+
+            <div class="mode-switch" role="tablist" aria-label="Voice mode">
+              <button class="mode-button active" data-mode="female">Female</button>
+              <button class="mode-button" data-mode="male">Male</button>
+            </div>
+
+            <div class="voice-provider">
+              <span class="voice-provider-label">Provider</span>
+              <strong id="voiceProviderName">Kokoro Neural TTS</strong>
+            </div>
+
+            <div class="voice-locks">
+              <div class="voice-lock-card">
+                <span class="voice-lock-label">Female voice</span>
+                <strong id="femaleVoiceName">Loading Kokoro female voice...</strong>
+              </div>
+              <div class="voice-lock-card">
+                <span class="voice-lock-label">Male voice</span>
+                <strong id="maleVoiceName">Loading Kokoro male voice...</strong>
+              </div>
+            </div>
+
+            <p class="voice-note" id="voiceNote">
+              Kokoro voice is loading for Jarvis.
+            </p>
+          </section>
+
+          <section class="card">
+            <div class="card-header">
+              <h3>Quick Commands</h3>
+              <span class="mini-label">Tap or speak</span>
+            </div>
+            <div id="quickCommands" class="chips"></div>
+          </section>
+
+          <section class="card history-card">
+            <div class="card-header">
+              <h3>Conversation</h3>
+              <span class="mini-label">Live</span>
+            </div>
+            <div id="history" class="history" aria-live="polite"></div>
+          </section>
+        </aside>
+      </main>
+
+      <div class="orb-dock">
+        <button id="dockStartButton" class="dock-primary" type="button">Start Voice</button>
+        <button id="dockStopButton" type="button">Stop</button>
+        <form id="dockTextCommandForm" class="dock-command-form">
+          <input
+            id="dockTextCommand"
+            type="text"
+            autocomplete="off"
+            placeholder="say a command or type here"
+          />
+          <button id="dockSendButton" type="submit" class="dock-send">Send</button>
+        </form>
+      </div>
+    </div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

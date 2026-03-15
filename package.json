@@ -1,0 +1,15 @@
+{
+  "name": "jarvis-voice-assistant",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Voice-first local desktop assistant with a JARVIS-style interface.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "kokoro-js": "^1.2.1"
+  }
+}
