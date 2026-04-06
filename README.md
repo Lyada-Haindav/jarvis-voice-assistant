@@ -13,6 +13,7 @@ A local JARVIS-style voice assistant with:
 - local desktop actions for opening apps, websites, folders, Spotify, volume, and configured tasks
 - macOS Shortcuts execution for wider laptop control
 - WhatsApp message drafting, with optional auto-send on macOS
+- reminders, calendar events, email drafts, quick notes, and local file finding
 - short-term context memory for follow-up commands like `reply saying ...`, `play it`, and `close it`
 
 ## Run it
@@ -114,6 +115,11 @@ Speak commands like:
 - `message dad saying I will be late`
 - `reply saying I am on my way`
 - `run shortcut Movie Mode`
+- `remind me to call mom tomorrow at 6 pm`
+- `create calendar event project review tomorrow at 5 pm for 1 hour`
+- `draft an email to name@example.com subject project update saying I will be late`
+- `find file resume`
+- `take note that I left the charger in the car`
 - `lock the screen`
 - `show commands`
 - `history`

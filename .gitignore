@@ -8,3 +8,4 @@ native-overlay/dist
 data/user-profile.json
 data/assistant-memory.json
 data/scheduled-messages.json
+data/assistant-notes.json

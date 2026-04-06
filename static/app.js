@@ -47,6 +47,8 @@ const state = {
   desktopPermissions: null,
   desktopWindowState: null,
   desktopSetupPrompted: false,
+  activeTask: null,
+  lastTask: null,
   compactMode: false,
   compactExpanded: false,
   menuBarOnlyMode: false,
@@ -87,6 +89,7 @@ const dom = {
   desktopVoiceToggle: document.querySelector("#desktopVoiceToggle"),
   desktopCommandsToggle: document.querySelector("#desktopCommandsToggle"),
   desktopHistoryToggle: document.querySelector("#desktopHistoryToggle"),
+  desktopTasksToggle: document.querySelector("#desktopTasksToggle"),
   desktopSetupCard: document.querySelector("#desktopSetupCard"),
   desktopSetupBadge: document.querySelector("#desktopSetupBadge"),
   desktopPermissionList: document.querySelector("#desktopPermissionList"),
@@ -873,6 +876,89 @@ function runClientActions(actions) {
   }
 }
 
+function normalizeTaskPayload(task) {
+  if (!task || typeof task !== "object") {
+    return null;
+  }
+
+  return {
+    id: String(task.id || "").trim(),
+    title: String(task.title || "Task").trim() || "Task",
+    status: String(task.status || "idle").trim() || "idle",
+    summary: String(task.summary || "").trim(),
+    currentStepIndex: Number.isFinite(task.currentStepIndex) ? Number(task.currentStepIndex) : -1,
+    currentStepLabel: String(task.currentStepLabel || "").trim(),
+    currentDetail: String(task.currentDetail || "").trim(),
+    startedAt: Number(task.startedAt || 0),
+    updatedAt: Number(task.updatedAt || 0),
+    finishedAt: Number(task.finishedAt || 0),
+    steps: Array.isArray(task.steps)
+      ? task.steps.map((step, index) => ({
+          index: Number(step?.index || index + 1),
+          label: String(step?.label || `Step ${index + 1}`).trim() || `Step ${index + 1}`,
+          status: String(step?.status || "pending").trim() || "pending",
+          detail: String(step?.detail || "").trim()
+        }))
+      : []
+  };
+}
+
+function taskStatusLabel(status) {
+  switch (String(status || "").trim().toLowerCase()) {
+    case "running":
+      return "Running";
+    case "completed":
+      return "Done";
+    case "failed":
+      return "Failed";
+    case "cancelled":
+      return "Cancelled";
+    default:
+      return "Idle";
+  }
+}
+
+function latestTask() {
+  return state.activeTask || state.lastTask || null;
+}
+
+function applyTaskState(task) {
+  const normalized = normalizeTaskPayload(task);
+  if (!normalized) {
+    return;
+  }
+
+  if (normalized.status === "running") {
+    state.activeTask = normalized;
+    state.lastTask = normalized;
+    setMainLine(normalized.title || "Running your task");
+    setStatus({
+      label: "Executing task",
+      pill: "Task",
+      note:
+        normalized.currentDetail ||
+        normalized.currentStepLabel ||
+        "Jarvis is working through your request."
+    });
+  } else {
+    state.activeTask = null;
+    state.lastTask = normalized;
+    if (normalized.summary) {
+      setStatus({
+        label: normalized.status === "failed" ? "Task failed" : "Task complete",
+        pill: normalized.status === "failed" ? "Failed" : "Done",
+        note: normalized.summary
+      });
+    }
+  }
+
+  if (state.drawerMode === "tasks") {
+    renderDrawer();
+  }
+  syncDrawerToggles();
+  queueDesktopOverlaySync();
+}
+
 function permissionSummary(label, status) {
   const normalized = String(status || "unknown");
   if (normalized === "granted") {
@@ -910,7 +996,8 @@ function syncDrawerToggles() {
     [dom.desktopSetupToggle, "setup"],
     [dom.desktopVoiceToggle, "voice"],
     [dom.desktopCommandsToggle, "commands"],
-    [dom.desktopHistoryToggle, "history"]
+    [dom.desktopHistoryToggle, "history"],
+    [dom.desktopTasksToggle, "tasks"]
   ];
 
   for (const [button, mode] of toggles) {
@@ -1865,16 +1952,25 @@ async function syncCompactPresence() {
 }
 
 function currentOverlayStatePayload() {
-  const title = String(dom.centerLabel?.textContent || "").trim();
-  const subtitle = String(dom.subtitleText?.textContent || dom.assistantLine?.textContent || "").trim();
-  const note = String(dom.centerNote?.textContent || "").trim();
+  const task = latestTask();
+  const taskRunning = task?.status === "running";
+  const title = taskRunning
+    ? "Running task"
+    : String(dom.centerLabel?.textContent || "").trim();
+  const subtitle = taskRunning
+    ? String(task?.currentStepLabel || task?.title || "").trim()
+    : String(dom.subtitleText?.textContent || dom.assistantLine?.textContent || "").trim();
+  const note = taskRunning
+    ? String(task?.currentDetail || task?.summary || "").trim()
+    : String(dom.centerNote?.textContent || "").trim();
   const awake = Boolean(
     state.awaitingConfirmation ||
       state.awaitingSelection ||
       commandWindowOpen() ||
       state.voiceSessionEnabled ||
       state.listening ||
-      state.speaking
+      state.speaking ||
+      taskRunning
   );
 
   return {
@@ -1886,7 +1982,13 @@ function currentOverlayStatePayload() {
     listening: Boolean(state.listening),
     speaking: Boolean(state.speaking),
     awake,
-    expanded: Boolean(state.compactExpanded || state.speaking || state.awaitingConfirmation || state.awaitingSelection),
+    expanded: Boolean(
+      state.compactExpanded ||
+        state.speaking ||
+        state.awaitingConfirmation ||
+        state.awaitingSelection ||
+        taskRunning
+    ),
     visible: Boolean(awake || state.compactMode || backgroundWakeModeActive())
   };
 }
@@ -2298,6 +2400,57 @@ function renderHistoryDrawer() {
   }
 }
 
+function renderTasksDrawer() {
+  dom.drawerLabel.textContent = "Tasks";
+  dom.drawerTitle.textContent = state.activeTask ? "Task Runner" : "Last Task";
+  dom.drawerContent.innerHTML = "";
+
+  const task = latestTask();
+  if (!task) {
+    const empty = document.createElement("div");
+    empty.className = "drawer-empty";
+    empty.textContent = "No task activity yet.";
+    dom.drawerContent.append(empty);
+    return;
+  }
+
+  dom.drawerContent.append(
+    createDrawerMetric(
+      task.title,
+      taskStatusLabel(task.status),
+      task.currentDetail || task.summary || "Jarvis is ready for the next task."
+    )
+  );
+
+  if (task.summary && task.summary !== task.currentDetail) {
+    dom.drawerContent.append(
+      createDrawerBlock("Summary", task.summary)
+    );
+  }
+
+  if (!Array.isArray(task.steps) || !task.steps.length) {
+    return;
+  }
+
+  for (const step of task.steps) {
+    const block = document.createElement("div");
+    block.className = "drawer-block";
+
+    const heading = document.createElement("strong");
+    heading.textContent = `${step.index}. ${step.label}`;
+
+    const detail = document.createElement("p");
+    detail.textContent = step.detail || taskStatusLabel(step.status);
+
+    const badge = document.createElement("span");
+    badge.className = "mini-label";
+    badge.textContent = taskStatusLabel(step.status);
+
+    block.append(heading, detail, badge);
+    dom.drawerContent.append(block);
+  }
+}
+
 function renderDrawer() {
   if (state.drawerMode === "setup") {
     renderSetupDrawer();
@@ -2316,6 +2469,11 @@ function renderDrawer() {
 
   if (state.drawerMode === "history") {
     renderHistoryDrawer();
+    return;
+  }
+
+  if (state.drawerMode === "tasks") {
+    renderTasksDrawer();
     return;
   }
 
@@ -3818,6 +3976,10 @@ async function runCommand(transcript, options = {}) {
           await handlers.onDelta(payload);
         }
 
+        if (payload.type === "task" && typeof handlers.onTask === "function") {
+          await handlers.onTask(payload.payload || null);
+        }
+
         if (payload.type === "final") {
           finalPayload = payload.payload || null;
         }
@@ -3896,6 +4058,9 @@ async function runCommand(transcript, options = {}) {
               streamLanguage = meta.conversationLanguage;
             }
           },
+          onTask: async (task) => {
+            applyTaskState(task);
+          },
           onDelta: async (delta) => {
             streamedReply = String(delta?.text || "").trim();
             if (!streamedReply) {
@@ -3930,6 +4095,9 @@ async function runCommand(transcript, options = {}) {
               streamLanguage = meta.conversationLanguage;
             }
           },
+          onTask: async (task) => {
+            applyTaskState(task);
+          },
           onDelta: async (delta) => {
             streamedReply = String(delta?.text || "").trim();
             if (!streamedReply) {
@@ -3960,6 +4128,9 @@ async function runCommand(transcript, options = {}) {
           if (meta?.conversationLanguage) {
             streamLanguage = meta.conversationLanguage;
           }
+        },
+        onTask: async (task) => {
+          applyTaskState(task);
         },
         onDelta: async (delta) => {
           streamedReply = String(delta?.text || "").trim();
@@ -4010,6 +4181,9 @@ async function runCommand(transcript, options = {}) {
     }
     if (payload.uiPanel) {
       setDrawer(payload.uiPanel);
+    }
+    if (payload.task) {
+      applyTaskState(payload.task);
     }
     runClientActions(payload.clientActions);
     setMainLine(
@@ -4493,7 +4667,8 @@ function bindEvents() {
     [dom.desktopSetupToggle, "setup"],
     [dom.desktopVoiceToggle, "voice"],
     [dom.desktopCommandsToggle, "commands"],
-    [dom.desktopHistoryToggle, "history"]
+    [dom.desktopHistoryToggle, "history"],
+    [dom.desktopTasksToggle, "tasks"]
   ].forEach(([button, mode]) => {
     if (!button) {
       return;
@@ -4754,7 +4929,10 @@ function rotateX(point, angle) {
 }
 
 async function loadConfig() {
-  const cloudConfig = await fetchJson("/api/config");
+  const [cloudStatus, cloudConfig] = await Promise.all([
+    fetchJson("/api/status").catch(() => null),
+    fetchJson("/api/config")
+  ]);
   state.cloudConfig = cloudConfig;
   state.config = await connectLocalAgent(cloudConfig);
   setConversationLanguage(state.config?.conversationLanguage || "auto", {
@@ -4766,6 +4944,9 @@ async function loadConfig() {
   updateVoiceBadge();
   updateVoiceLockSummary();
   renderQuickCommands();
+  if (cloudStatus?.task) {
+    applyTaskState(cloudStatus.task);
+  }
 
   addHistory(
     "assistant",

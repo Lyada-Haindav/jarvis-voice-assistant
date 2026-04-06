@@ -27,10 +27,13 @@ const CONFIG_PATH = path.join(__dirname, "config", "assistant.config.json");
 const USER_PROFILE_PATH = path.join(__dirname, "data", "user-profile.json");
 const ASSISTANT_MEMORY_PATH = path.join(__dirname, "data", "assistant-memory.json");
 const SCHEDULED_MESSAGES_PATH = path.join(__dirname, "data", "scheduled-messages.json");
+const ASSISTANT_NOTES_PATH = path.join(__dirname, "data", "assistant-notes.json");
 const TTS_CACHE_DIR = path.join(os.tmpdir(), "jarvis-tts");
 const ADDRESS_BOOK_DIR = path.join(os.homedir(), "Library", "Application Support", "AddressBook");
 const CONFIRMATION_TTL_MS = 60_000;
 const SCHEDULED_MESSAGE_POLL_MS = 15_000;
+const DEFAULT_CALENDAR_EVENT_DURATION_MINUTES = 30;
+const MAX_TASK_HISTORY_STEPS = 12;
 const MAX_KNOWLEDGE_TURNS = 8;
 const MAX_CONVERSATION_TURNS = 20;
 const PROMPT_CONVERSATION_TURNS = 6;
@@ -715,6 +718,8 @@ const state = {
   knowledgeHistory: [],
   conversationHistory: [],
   sessionContext: createSessionContext(),
+  activeTask: null,
+  lastTask: null,
   scheduledMessages: [],
   scheduledMessageTimer: null,
   scheduledMessageInFlight: new Set(),
@@ -877,6 +882,156 @@ function isLocalExecutionIntent(intent) {
   return Boolean(intent && LOCAL_EXECUTION_INTENT_TYPES.has(intent.type));
 }
 
+function publicTask(task) {
+  if (!task || typeof task !== "object") {
+    return null;
+  }
+
+  const steps = Array.isArray(task.steps)
+    ? task.steps.slice(0, MAX_TASK_HISTORY_STEPS).map((step, index) => ({
+        index: Number(step?.index || index + 1),
+        label: String(step?.label || `Step ${index + 1}`).trim() || `Step ${index + 1}`,
+        status: String(step?.status || "pending").trim() || "pending",
+        detail: String(step?.detail || "").trim()
+      }))
+    : [];
+
+  return {
+    id: String(task.id || "").trim(),
+    title: String(task.title || "Task").trim() || "Task",
+    status: String(task.status || "idle").trim() || "idle",
+    summary: String(task.summary || "").trim(),
+    currentStepIndex: Number.isFinite(task.currentStepIndex) ? Number(task.currentStepIndex) : -1,
+    currentStepLabel: String(task.currentStepLabel || "").trim(),
+    currentDetail: String(task.currentDetail || "").trim(),
+    startedAt: Number(task.startedAt || 0),
+    updatedAt: Number(task.updatedAt || 0),
+    finishedAt: Number(task.finishedAt || 0),
+    steps
+  };
+}
+
+function publishTask(task, runtime = {}) {
+  const snapshot = publicTask(task);
+  if (!snapshot) {
+    return null;
+  }
+
+  if (snapshot.status === "running") {
+    state.activeTask = snapshot;
+  } else {
+    state.activeTask = null;
+  }
+  state.lastTask = snapshot;
+
+  if (typeof runtime.onTaskUpdate === "function") {
+    try {
+      runtime.onTaskUpdate(snapshot);
+    } catch (error) {
+      // Ignore task listener failures so the command itself can continue.
+    }
+  }
+
+  return snapshot;
+}
+
+function attachTask(result, task) {
+  const snapshot = publicTask(task);
+  if (!snapshot) {
+    return result;
+  }
+  state.lastTask = snapshot;
+  if (snapshot.status !== "running") {
+    state.activeTask = null;
+  }
+  return {
+    ...result,
+    task: snapshot
+  };
+}
+
+function createTaskTracker(title, stepLabels = [], runtime = {}) {
+  const now = Date.now();
+  const task = {
+    id: `task-${now.toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    title: String(title || "Task").trim() || "Task",
+    status: "running",
+    summary: "",
+    currentStepIndex: -1,
+    currentStepLabel: "",
+    currentDetail: "",
+    startedAt: now,
+    updatedAt: now,
+    finishedAt: 0,
+    steps: stepLabels.map((label, index) => ({
+      index: index + 1,
+      label: String(label || `Step ${index + 1}`).trim() || `Step ${index + 1}`,
+      status: "pending",
+      detail: ""
+    }))
+  };
+
+  function touch() {
+    task.updatedAt = Date.now();
+  }
+
+  function updateStep(index, patch = {}) {
+    if (!Array.isArray(task.steps) || index < 0 || index >= task.steps.length) {
+      return;
+    }
+    task.steps[index] = {
+      ...task.steps[index],
+      ...patch
+    };
+    touch();
+    publishTask(task, runtime);
+  }
+
+  publishTask(task, runtime);
+
+  return {
+    snapshot() {
+      return publicTask(task);
+    },
+    startStep(index, detail = "") {
+      task.currentStepIndex = index;
+      task.currentStepLabel = task.steps[index]?.label || "";
+      task.currentDetail = String(detail || "").trim();
+      updateStep(index, {
+        status: "running",
+        detail: String(detail || "").trim()
+      });
+    },
+    finishStep(index, detail = "", status = "completed") {
+      task.currentStepIndex = index;
+      task.currentStepLabel = task.steps[index]?.label || "";
+      task.currentDetail = String(detail || "").trim();
+      updateStep(index, {
+        status,
+        detail: String(detail || "").trim()
+      });
+    },
+    complete(summary = "") {
+      task.status = "completed";
+      task.summary = String(summary || "").trim();
+      task.currentDetail = task.summary;
+      task.finishedAt = Date.now();
+      touch();
+      publishTask(task, runtime);
+      return publicTask(task);
+    },
+    fail(summary = "") {
+      task.status = "failed";
+      task.summary = String(summary || "").trim();
+      task.currentDetail = task.summary;
+      task.finishedAt = Date.now();
+      touch();
+      publishTask(task, runtime);
+      return publicTask(task);
+    }
+  };
+}
+
 function publicStatus() {
   const tts = publicTtsConfig();
   return {
@@ -891,7 +1046,8 @@ function publicStatus() {
       provider: tts.provider,
       available: tts.available !== false
     },
-    speechRecognition: publicSpeechRecognitionConfig()
+    speechRecognition: publicSpeechRecognitionConfig(),
+    task: state.activeTask || state.lastTask || null
   };
 }
 
@@ -1054,6 +1210,33 @@ function executeCloudIntent(intent, config) {
       return cloudUnsupportedReply(
         `Shortcuts need a local device app. They can't run from the hosted website alone.`
       );
+    case "findFile":
+      return cloudUnsupportedReply(
+        `Local file search needs the desktop app running on the laptop that has those files.`
+      );
+    case "createReminder":
+    case "showReminders":
+      return cloudUnsupportedReply(
+        `Reminders need the desktop app running on your Mac.`
+      );
+    case "createCalendarEvent":
+    case "showCalendarAgenda":
+      return cloudUnsupportedReply(
+        `Calendar access needs the desktop app running on your Mac.`
+      );
+    case "createNote":
+    case "showNotes":
+      return cloudUnsupportedReply(
+        `Local notes are only available from the desktop app on your laptop.`
+      );
+    case "emailDraft": {
+      const draft = buildEmailDraftUrl(intent, config);
+      return openUrlClientReply(
+        draft.url,
+        draft.label,
+        `Opening an email draft for ${intent.recipientLabel || intent.recipient} on this device.`
+      );
+    }
     case "whatsapp": {
       const phone = normalizeWhatsappPhone(intent.contact?.phone || "");
       if (!phone) {
@@ -1584,6 +1767,50 @@ function parseScheduledDateTimeExpression(expression) {
   }
 
   return null;
+}
+
+function parseDurationExpression(expression) {
+  const raw = String(expression || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const patterns = [
+    { pattern: /^(\d+)\s*(minutes?|mins?)$/i, multiplier: 1 },
+    { pattern: /^(\d+)\s*(hours?|hrs?)$/i, multiplier: 60 },
+    { pattern: /^(\d+)\s*(घंटा|घंटे)$/u, multiplier: 60 },
+    { pattern: /^(\d+)\s*(मिनट)$/u, multiplier: 1 },
+    { pattern: /^(\d+)\s*(గంట|గంటలు)$/u, multiplier: 60 },
+    { pattern: /^(\d+)\s*(నిమిషం|నిమిషాలు)$/u, multiplier: 1 }
+  ];
+
+  for (const { pattern, multiplier } of patterns) {
+    const match = raw.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number(match[1]);
+    if (!Number.isFinite(value) || value <= 0) {
+      return null;
+    }
+    return value * multiplier;
+  }
+
+  return null;
+}
+
+function dayRange(day) {
+  const normalized = normalizeText(day || "");
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  if (normalized === "tomorrow") {
+    start.setDate(start.getDate() + 1);
+  }
+
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { start, end };
 }
 
 function extractScheduledCommand(rawText) {
@@ -2288,6 +2515,11 @@ function publicConfig(config) {
       `next song`,
       `set volume to 40`,
       `close Spotify`,
+      `remind me to call mom tomorrow at 6 pm`,
+      `create calendar event project review tomorrow at 5 pm for 1 hour`,
+      `draft an email to name@example.com subject project update saying I will be late`,
+      `find file resume`,
+      `take note that I left the charger in the car`,
       `run shortcut Movie Mode`,
       `show commands`
     ]
@@ -2393,6 +2625,73 @@ function currentUserDisplayName(profile = readUserProfile()) {
     String(profile.detectedName || "").trim() ||
     "there"
   );
+}
+
+function defaultAssistantNotes() {
+  return [];
+}
+
+async function readAssistantNotes() {
+  try {
+    const text = await fsp.readFile(ASSISTANT_NOTES_PATH, "utf8");
+    const parsed = JSON.parse(text);
+    if (!Array.isArray(parsed)) {
+      return defaultAssistantNotes();
+    }
+
+    return parsed
+      .map((entry) => ({
+        id: String(entry?.id || "").trim(),
+        text: String(entry?.text || "").trim(),
+        createdAt: Number(entry?.createdAt || 0)
+      }))
+      .filter((entry) => entry.text)
+      .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0))
+      .slice(0, 40);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Jarvis could not read assistant notes: ${error.message}`);
+    }
+    return defaultAssistantNotes();
+  }
+}
+
+async function writeAssistantNotes(notes) {
+  const safeNotes = Array.isArray(notes)
+    ? notes
+        .map((entry) => ({
+          id: String(entry?.id || "").trim(),
+          text: String(entry?.text || "").trim(),
+          createdAt: Number(entry?.createdAt || Date.now())
+        }))
+        .filter((entry) => entry.text)
+        .sort((left, right) => Number(right.createdAt || 0) - Number(left.createdAt || 0))
+        .slice(0, 80)
+    : [];
+
+  await fsp.mkdir(path.dirname(ASSISTANT_NOTES_PATH), { recursive: true });
+  await fsp.writeFile(
+    ASSISTANT_NOTES_PATH,
+    JSON.stringify(safeNotes, null, 2) + "\n",
+    "utf8"
+  );
+}
+
+async function addAssistantNote(text) {
+  const safeText = String(text || "").trim();
+  if (!safeText) {
+    return null;
+  }
+
+  const notes = await readAssistantNotes();
+  const entry = {
+    id: `note-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`,
+    text: safeText,
+    createdAt: Date.now()
+  };
+  notes.unshift(entry);
+  await writeAssistantNotes(notes);
+  return entry;
 }
 
 function nativeTtsConfig() {
@@ -3492,6 +3791,233 @@ function parseScheduledMessageIntent(rawText, config) {
   return null;
 }
 
+function parseReminderIntent(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  if (
+    /^(?:show|list|check|what(?:'s| is))\s+(?:my\s+)?reminders$/i.test(text) ||
+    /^(?:show|list|check)\s+pending reminders$/i.test(text)
+  ) {
+    return {
+      type: "showReminders"
+    };
+  }
+
+  const extracted = extractScheduledCommand(text);
+  if (extracted) {
+    const reminderText = String(extracted.commandText || "")
+      .replace(/^(?:remind me to)\s+/i, "")
+      .replace(/^(?:create|add|set)\s+(?:a\s+)?reminder(?:\s+to)?\s+/i, "")
+      .trim();
+    const reminderDate = parseScheduledDateTimeExpression(extracted.timeText);
+    if (reminderText && reminderDate) {
+      return {
+        type: "createReminder",
+        title: reminderText,
+        when: reminderDate.toISOString(),
+        whenExpression: extracted.timeText
+      };
+    }
+  }
+
+  const patterns = [
+    /^(?:remind me to)\s+(.+)$/i,
+    /^(?:create|add|set)\s+(?:a\s+)?reminder(?:\s+to)?\s+(.+)$/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const reminderText = String(match[1] || "").trim();
+    const whenExpression = String(match[2] || "").trim();
+    if (!reminderText) {
+      continue;
+    }
+
+    const reminderDate = whenExpression ? parseScheduledDateTimeExpression(whenExpression) : null;
+    return {
+      type: "createReminder",
+      title: reminderText,
+      when: reminderDate ? reminderDate.toISOString() : "",
+      whenExpression
+    };
+  }
+
+  return null;
+}
+
+function parseCalendarIntent(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const normalized = normalizeText(text);
+  if (
+    /^(?:show|what(?:'s| is)|list|check)\s+(?:my\s+)?calendar(?:\s+for)?\s+today$/i.test(text) ||
+    normalized === "calendar today"
+  ) {
+    return {
+      type: "showCalendarAgenda",
+      day: "today"
+    };
+  }
+
+  if (
+    /^(?:show|what(?:'s| is)|list|check)\s+(?:my\s+)?calendar(?:\s+for)?\s+tomorrow$/i.test(text) ||
+    normalized === "calendar tomorrow"
+  ) {
+    return {
+      type: "showCalendarAgenda",
+      day: "tomorrow"
+    };
+  }
+
+  const eventPatterns = [
+    /^(?:create|add|schedule)\s+(?:a\s+)?(?:calendar\s+)?event\s+(.+?)\s+(today\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|tomorrow\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)|on\s+\d{4}-\d{2}-\d{2}\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)(?:\s+for\s+(.+))?$/i,
+    /^(?:add|put)\s+(.+?)\s+to\s+(?:my\s+)?calendar\s+(today\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|tomorrow\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?|in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?)|on\s+\d{4}-\d{2}-\d{2}\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)(?:\s+for\s+(.+))?$/i
+  ];
+
+  for (const pattern of eventPatterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const title = String(match[1] || "").trim();
+    const whenExpression = String(match[2] || "").trim();
+    const startDate = parseScheduledDateTimeExpression(whenExpression);
+    if (!title || !startDate) {
+      return createReply(
+        `Tell me the time clearly, like "create calendar event project review tomorrow at 6 pm".`
+      );
+    }
+
+    const durationMinutes =
+      parseDurationExpression(String(match[3] || "").trim()) ||
+      DEFAULT_CALENDAR_EVENT_DURATION_MINUTES;
+
+    return {
+      type: "createCalendarEvent",
+      title,
+      when: startDate.toISOString(),
+      whenExpression,
+      durationMinutes
+    };
+  }
+
+  return null;
+}
+
+function parseEmailDraftIntent(rawText, config) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const patterns = [
+    /^(?:draft|compose)\s+(?:an?\s+)?email\s+to\s+(.+?)\s+subject\s+(.+?)\s+(?:saying|that|with message)\s+(.+)$/i,
+    /^(?:draft|compose)\s+(?:an?\s+)?email\s+to\s+(.+?)\s+(?:saying|that|with message)\s+(.+)$/i,
+    /^(?:email)\s+(.+?)\s+about\s+(.+?)\s+(?:saying|that|with message)\s+(.+)$/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const rawRecipient = String(match[1] || "").trim();
+    const subject =
+      pattern === patterns[1] ? "" : String(match[2] || "").trim();
+    const body =
+      pattern === patterns[1] ? String(match[2] || "").trim() : String(match[3] || "").trim();
+
+    if (!rawRecipient || !body) {
+      continue;
+    }
+
+    const directEmail = rawRecipient.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0] || "";
+    const configContact = resolveContact(config, rawRecipient);
+    const recipient =
+      directEmail || String(configContact?.email || "").trim();
+
+    if (!recipient) {
+      return createReply(
+        `Tell me the email address clearly, like "draft an email to name@example.com subject update saying I will be late".`
+      );
+    }
+
+    return {
+      type: "emailDraft",
+      recipient,
+      recipientLabel: configContact?.displayName || rawRecipient,
+      subject,
+      body
+    };
+  }
+
+  return null;
+}
+
+function parseNoteIntent(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  if (/^(?:show|list|read)\s+(?:my\s+)?notes$/i.test(text) || /^(?:show|list)\s+recent notes$/i.test(text)) {
+    return {
+      type: "showNotes"
+    };
+  }
+
+  const match = text.match(
+    /^(?:take|save|add|write|make)\s+(?:a\s+)?note(?:\s+that)?\s+(.+)$/i
+  );
+  if (!match) {
+    return null;
+  }
+
+  return {
+    type: "createNote",
+    text: String(match[1] || "").trim()
+  };
+}
+
+function parseFileSearchIntent(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  let match = text.match(/^(?:find|search for)\s+(?:a\s+)?file\s+(.+)$/i);
+  if (match) {
+    return {
+      type: "findFile",
+      query: String(match[1] || "").trim(),
+      openFirst: false
+    };
+  }
+
+  match = text.match(/^(?:open)\s+(?:the\s+)?file\s+(.+)$/i);
+  if (match) {
+    return {
+      type: "findFile",
+      query: String(match[1] || "").trim(),
+      openFirst: true
+    };
+  }
+
+  return null;
+}
+
 function parseSpotifyIntent(rawText) {
   const normalized = normalizeText(rawText);
 
@@ -4203,7 +4729,17 @@ function looksLikeCompoundCommand(text) {
 
 function looksLikeDeviceControlRequest(text) {
   const normalized = normalizeText(text);
-  return /^(?:open|show|go to|launch|start|close|quit|exit|search|message|send|text|whatsapp|run|lock|take|capture|sleep|restart|reboot|shutdown|shut down|power off|turn on|turn off|enable|disable|toggle|set|switch|use|play|pause|resume|next|previous|skip|mute|unmute)\b/.test(
+  if (
+    /^(?:open|show|go to|launch|start|close|quit|exit|search|message|send|text|whatsapp|run|lock|take|capture|sleep|restart|reboot|shutdown|shut down|power off|turn on|turn off|enable|disable|toggle|set|switch|use|play|pause|resume|next|previous|skip|mute|unmute)\b/.test(
+      normalized
+    )
+  ) {
+    return true;
+  }
+
+  return /^(?:add|create|make|draft|compose|find|list|check|what(?:s| is)|remind|note)\b/.test(
+    normalized
+  ) && /\b(reminder|reminders|calendar|event|events|email|gmail|mail|note|notes|file|files)\b/.test(
     normalized
   );
 }
@@ -4212,7 +4748,8 @@ function summarizePlannerContext(config) {
   const contacts = Object.entries(config.contacts || {}).map(([key, contact]) => ({
     key,
     displayName: contact.displayName || titleCase(key),
-    aliases: Array.isArray(contact.aliases) ? contact.aliases : []
+    aliases: Array.isArray(contact.aliases) ? contact.aliases : [],
+    email: String(contact.email || "").trim()
   }));
 
   const apps = Object.entries(config.apps || {}).map(([key, appName]) => ({
@@ -4255,7 +4792,12 @@ function summarizePlannerContext(config) {
       systemActions: true,
       siteSearch: true,
       mixedTasks: true,
-      arbitraryWhatsappContacts: true
+      arbitraryWhatsappContacts: true,
+      reminders: process.platform === "darwin",
+      calendar: process.platform === "darwin",
+      emailDrafts: true,
+      notes: true,
+      fileSearch: true
     },
     spotify: {
       likedSongsUriConfigured: Boolean(config.spotify?.likedSongsUri)
@@ -4328,7 +4870,15 @@ async function callGeminiPlanner(rawText, config) {
     `    { "type": "whatsapp", "contactKey": "dad", "message": "I will be late" },`,
     `    { "type": "whatsapp_name", "contactName": "Vinnu", "message": "I will be late" },`,
     `    { "type": "shortcut", "shortcutName": "Morning Routine" },`,
-    `    { "type": "custom_action", "phrase": "lock the screen" }`,
+    `    { "type": "custom_action", "phrase": "lock the screen" },`,
+    `    { "type": "find_file", "query": "resume", "openFirst": true },`,
+    `    { "type": "reminder_create", "title": "Call dad", "when": "tomorrow at 6 pm" },`,
+    `    { "type": "show_reminders" },`,
+    `    { "type": "calendar_create", "title": "Project review", "when": "tomorrow at 6 pm", "durationMinutes": 60 },`,
+    `    { "type": "calendar_agenda", "day": "today" | "tomorrow" },`,
+    `    { "type": "email_draft", "to": "name@example.com", "subject": "Project update", "body": "I will be late" },`,
+    `    { "type": "note_create", "text": "Pick up batteries on the way home" },`,
+    `    { "type": "show_notes" }`,
     `  ]`,
     `}`,
     `Rules:`,
@@ -4339,6 +4889,10 @@ async function callGeminiPlanner(rawText, config) {
     `- Use spotify_control for Spotify playback requests.`,
     `- Use search_site for site-specific search requests like YouTube, GitHub, or Gmail.`,
     `- Use whatsapp_name for a contact name that is not in configured contact keys but may exist in Mac Contacts.`,
+    `- Use find_file for local file lookups and openFirst true when the user explicitly wants the file opened.`,
+    `- Use reminder_create and calendar_create with simple supported when phrases like "today at 4 pm", "tomorrow at 6 pm", "in 2 hours", or "on 2026-04-10 at 18:30".`,
+    `- Use show_reminders, calendar_agenda, note_create, show_notes, and email_draft when those match the user's request.`,
+    `- Use email addresses from the user request or configured contacts only.`,
     `- Preserve Hindi and Telugu contact names and message text exactly as the user said them.`,
     `- Use knowledge_query when information lookup is one step inside a larger actionable task.`,
     `- Use ui_panel for requests to show commands, history, or close the panel.`,
@@ -4562,7 +5116,15 @@ async function callOpenRouterPlanner(rawText, config) {
     `    { "type": "whatsapp", "contactKey": "dad", "message": "I will be late" },`,
     `    { "type": "whatsapp_name", "contactName": "Vinnu", "message": "I will be late" },`,
     `    { "type": "shortcut", "shortcutName": "Morning Routine" },`,
-    `    { "type": "custom_action", "phrase": "lock the screen" }`,
+    `    { "type": "custom_action", "phrase": "lock the screen" },`,
+    `    { "type": "find_file", "query": "resume", "openFirst": true },`,
+    `    { "type": "reminder_create", "title": "Call dad", "when": "tomorrow at 6 pm" },`,
+    `    { "type": "show_reminders" },`,
+    `    { "type": "calendar_create", "title": "Project review", "when": "tomorrow at 6 pm", "durationMinutes": 60 },`,
+    `    { "type": "calendar_agenda", "day": "today" | "tomorrow" },`,
+    `    { "type": "email_draft", "to": "name@example.com", "subject": "Project update", "body": "I will be late" },`,
+    `    { "type": "note_create", "text": "Pick up batteries on the way home" },`,
+    `    { "type": "show_notes" }`,
     `  ]`,
     `}`,
     `Rules:`,
@@ -4573,6 +5135,10 @@ async function callOpenRouterPlanner(rawText, config) {
     `- Use spotify_control for Spotify playback requests.`,
     `- Use search_site for site-specific search requests like YouTube, GitHub, or Gmail.`,
     `- Use whatsapp_name for a contact name that is not in configured contact keys but may exist in Mac Contacts.`,
+    `- Use find_file for local file lookups and openFirst true when the user explicitly wants the file opened.`,
+    `- Use reminder_create and calendar_create with simple supported when phrases like "today at 4 pm", "tomorrow at 6 pm", "in 2 hours", or "on 2026-04-10 at 18:30".`,
+    `- Use show_reminders, calendar_agenda, note_create, show_notes, and email_draft when those match the user's request.`,
+    `- Use email addresses from the user request or configured contacts only.`,
     `- Preserve Hindi and Telugu contact names and message text exactly as the user said them.`,
     `- Use knowledge_query when information lookup is one step inside a larger actionable task.`,
     `- Use ui_panel for requests to show commands, history, or close the panel.`,
@@ -4731,6 +5297,31 @@ function handleIntent(rawText, config, metadata = {}) {
       );
     }
     return customIntent;
+  }
+
+  const reminderIntent = parseReminderIntent(cleanText);
+  if (reminderIntent) {
+    return reminderIntent;
+  }
+
+  const calendarIntent = parseCalendarIntent(cleanText);
+  if (calendarIntent) {
+    return calendarIntent;
+  }
+
+  const emailDraftIntent = parseEmailDraftIntent(cleanText, config);
+  if (emailDraftIntent) {
+    return emailDraftIntent;
+  }
+
+  const noteIntent = parseNoteIntent(cleanText);
+  if (noteIntent) {
+    return noteIntent;
+  }
+
+  const fileSearchIntent = parseFileSearchIntent(cleanText);
+  if (fileSearchIntent) {
+    return fileSearchIntent;
   }
 
   const shortcutIntent = parseShortcutIntent(cleanText);
@@ -5329,37 +5920,207 @@ function plannerStepToIntent(step, config) {
         requiresConfirmation: Boolean(action.requiresConfirmation)
       };
     }
+    case "find_file":
+      if (!step.query) {
+        return null;
+      }
+      return {
+        type: "findFile",
+        query: step.query,
+        openFirst: Boolean(step.openFirst)
+      };
+    case "reminder_create":
+      if (!step.title) {
+        return null;
+      }
+      return {
+        type: "createReminder",
+        title: step.title,
+        whenExpression: String(step.when || "").trim(),
+        when:
+          parseScheduledDateTimeExpression(String(step.when || "").trim())?.toISOString() || ""
+      };
+    case "show_reminders":
+      return {
+        type: "showReminders"
+      };
+    case "calendar_create":
+      if (!step.title) {
+        return null;
+      }
+      return {
+        type: "createCalendarEvent",
+        title: step.title,
+        whenExpression: String(step.when || "").trim(),
+        when:
+          parseScheduledDateTimeExpression(String(step.when || "").trim())?.toISOString() || "",
+        durationMinutes:
+          Math.max(5, Number(step.durationMinutes || DEFAULT_CALENDAR_EVENT_DURATION_MINUTES)) ||
+          DEFAULT_CALENDAR_EVENT_DURATION_MINUTES
+      };
+    case "calendar_agenda":
+      if (!["today", "tomorrow"].includes(String(step.day || "").trim().toLowerCase())) {
+        return null;
+      }
+      return {
+        type: "showCalendarAgenda",
+        day: String(step.day || "").trim().toLowerCase()
+      };
+    case "email_draft":
+      if (!step.to || !step.body) {
+        return null;
+      }
+      return {
+        type: "emailDraft",
+        recipient: String(step.to || "").trim(),
+        recipientLabel: String(step.to || "").trim(),
+        subject: String(step.subject || "").trim(),
+        body: String(step.body || "").trim()
+      };
+    case "note_create":
+      if (!step.text) {
+        return null;
+      }
+      return {
+        type: "createNote",
+        text: String(step.text || "").trim()
+      };
+    case "show_notes":
+      return {
+        type: "showNotes"
+      };
     default:
       return null;
   }
 }
 
-async function executePlannedSteps(steps, config) {
+function summarizePlannerStep(step, config) {
+  if (!step || typeof step !== "object") {
+    return "Task step";
+  }
+
+  switch (step.type) {
+    case "open_app":
+      return `Open ${step.appName || "app"}`;
+    case "open_site":
+      return `Open ${titleCase(String(step.siteKey || "site"))}`;
+    case "open_folder":
+      return `Open ${titleCase(String(step.folderKey || "folder"))}`;
+    case "open_url":
+      return `Open ${step.url || "URL"}`;
+    case "search_google":
+      return `Search Google for ${step.query || "query"}`;
+    case "search_site":
+      return `Search ${titleCase(String(step.siteKey || "site"))} for ${step.query || "query"}`;
+    case "knowledge_query":
+      return `Look up ${step.query || "information"}`;
+    case "ui_panel":
+      return `Show ${step.panel || "panel"}`;
+    case "quit_app":
+      return `Close ${step.appName || "app"}`;
+    case "volume_control":
+      return `Adjust volume`;
+    case "settings_panel":
+      return `Open ${step.panelKey || "settings"}`;
+    case "appearance_mode":
+      return `Change appearance`;
+    case "wifi_control":
+      return `Toggle Wi-Fi`;
+    case "power_action":
+      return `Run ${step.action || "power"} action`;
+    case "system_action":
+      return `Run ${step.action || "system"} action`;
+    case "spotify_control":
+      return `Control Spotify`;
+    case "whatsapp":
+      return `Draft WhatsApp for ${titleCase(String(step.contactKey || "contact"))}`;
+    case "whatsapp_name":
+      return `Find ${step.contactName || "contact"} in WhatsApp`;
+    case "shortcut":
+      return `Run shortcut ${step.shortcutName || ""}`.trim();
+    case "custom_action":
+      return step.phrase || "Run custom action";
+    case "find_file":
+      return `${step.openFirst ? "Open" : "Find"} file ${step.query || ""}`.trim();
+    case "reminder_create":
+      return `Create reminder ${step.title || ""}`.trim();
+    case "show_reminders":
+      return `Show reminders`;
+    case "calendar_create":
+      return `Create calendar event ${step.title || ""}`.trim();
+    case "calendar_agenda":
+      return `Show calendar for ${step.day || "today"}`;
+    case "email_draft":
+      return `Draft email to ${step.to || "recipient"}`;
+    case "note_create":
+      return `Save note`;
+    case "show_notes":
+      return `Show notes`;
+    default:
+      return "Task step";
+  }
+}
+
+async function executePlannedSteps(steps, config, runtime = {}) {
   if (!Array.isArray(steps) || !steps.length) {
     return createReply(`I couldn't find an executable action in that request.`);
   }
 
   const summaries = [];
   const clientActions = [];
+  const tracker = createTaskTracker(
+    "Running your task",
+    steps.map((step) => summarizePlannerStep(step, config)),
+    runtime
+  );
   for (const step of steps) {
     const intent = plannerStepToIntent(step, config);
     if (!intent) {
-      return createReply(
-        `I understood the request, but one of the planned actions was not available in the current laptop controls.`
+      const failureReply = `I understood the request, but one of the planned actions was not available in the current laptop controls.`;
+      tracker.fail(failureReply);
+      return attachTask(
+        createReply(
+          `I understood the request, but one of the planned actions was not available in the current laptop controls.`
+        ),
+        tracker.snapshot()
       );
     }
-    const result = await executeIntent(intent, config);
+    const stepIndex = summaries.length;
+    tracker.startStep(stepIndex, summarizePlannerStep(step, config));
+    let result = null;
+    try {
+      result = await executeIntent(intent, config, runtime);
+    } catch (error) {
+      const failureReply = `I ran into an error while executing that task step: ${error.message}`;
+      tracker.finishStep(stepIndex, failureReply, "failed");
+      tracker.fail(failureReply);
+      return attachTask(
+        createReply(failureReply, {
+          status: "failed"
+        }),
+        tracker.snapshot()
+      );
+    }
     summaries.push(result.reply);
     if (Array.isArray(result.clientActions) && result.clientActions.length) {
       clientActions.push(...result.clientActions);
     }
+    tracker.finishStep(stepIndex, result.reply, result.status === "failed" ? "failed" : "completed");
+    if (result.status === "failed" || result.status === "cancelled") {
+      tracker.fail(result.reply);
+      return attachTask(result, tracker.snapshot());
+    }
   }
 
-  return withClientActions(
+  const completedTask = tracker.complete(summaries[summaries.length - 1]);
+  return attachTask(
+    withClientActions(
     createReply(summaries[summaries.length - 1], {
       status: "completed"
     }),
     clientActions
+    ),
+    completedTask
   );
 }
 
@@ -6981,7 +7742,630 @@ async function executeSpotifyControl(action, config) {
   }
 }
 
-async function executeIntent(intent, config) {
+function appleScriptString(value) {
+  return String(value || "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
+}
+
+function appleScriptDateSetupLines(variableName, value) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return [];
+  }
+
+  const monthNames = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December"
+  ];
+
+  return [
+    `set ${variableName} to current date`,
+    `set year of ${variableName} to ${date.getFullYear()}`,
+    `set month of ${variableName} to ${monthNames[date.getMonth()]}`,
+    `set day of ${variableName} to ${date.getDate()}`,
+    `set time of ${variableName} to (${date.getHours()} * hours + ${date.getMinutes()} * minutes + ${date.getSeconds()} * seconds)`
+  ];
+}
+
+function briefDateTime(value, language = preferredConversationLanguage()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(localeForLanguage(language), {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(date);
+}
+
+function buildEmailDraftUrl(intent, config) {
+  const gmailBase = String(config.sites?.gmail || "").trim();
+  if (gmailBase) {
+    const compose = new URL(gmailBase);
+    compose.searchParams.set("view", "cm");
+    compose.searchParams.set("fs", "1");
+    if (intent.recipient) {
+      compose.searchParams.set("to", intent.recipient);
+    }
+    if (intent.subject) {
+      compose.searchParams.set("su", intent.subject);
+    }
+    if (intent.body) {
+      compose.searchParams.set("body", intent.body);
+    }
+    return {
+      url: compose.toString(),
+      label: "Gmail"
+    };
+  }
+
+  const params = new URLSearchParams();
+  if (intent.subject) {
+    params.set("subject", intent.subject);
+  }
+  if (intent.body) {
+    params.set("body", intent.body);
+  }
+  return {
+    url: `mailto:${encodeURIComponent(intent.recipient || "")}${params.toString() ? `?${params}` : ""}`,
+    label: "your mail app"
+  };
+}
+
+async function executeReminderCreate(intent) {
+  if (process.platform !== "darwin") {
+    return createReply(`Reminder creation is only wired for macOS right now.`);
+  }
+
+  const title = String(intent.title || "").trim();
+  if (!title) {
+    return createReply(`Tell me what the reminder should say.`);
+  }
+
+  const reminderAtCandidate = intent.when ? new Date(intent.when) : null;
+  const reminderAt =
+    reminderAtCandidate && !Number.isNaN(reminderAtCandidate.getTime())
+      ? reminderAtCandidate
+      : parseScheduledDateTimeExpression(intent.whenExpression || "");
+  const lines = [];
+  if (reminderAt && !Number.isNaN(reminderAt.getTime())) {
+    lines.push(...appleScriptDateSetupLines("reminderDate", reminderAt));
+  }
+
+  const reminderProperties = [`name:"${appleScriptString(title)}"`];
+  if (reminderAt && !Number.isNaN(reminderAt.getTime())) {
+    reminderProperties.push("remind me date:reminderDate");
+  }
+
+  lines.push(
+    'tell application "Reminders"',
+    'if (count of lists) is 0 then make new list with properties {name:"Reminders"}',
+    "tell list 1",
+    `make new reminder with properties {${reminderProperties.join(", ")}}`,
+    "end tell",
+    "end tell"
+  );
+
+  try {
+    await runOsaScript(lines, "AppleScript");
+    rememberSessionContext({
+      lastIntentType: "createReminder"
+    });
+    const reply =
+      reminderAt && !Number.isNaN(reminderAt.getTime())
+        ? `Reminder saved for ${formatScheduledDateTime(reminderAt)}.`
+        : `Reminder saved.`;
+    return attachTask(
+      createReply(reply, {
+        status: "completed"
+      }),
+      {
+        title: "Reminder",
+        status: "completed",
+        summary: reply,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: Date.now(),
+        currentStepIndex: 0,
+        currentStepLabel: "Create reminder",
+        currentDetail: reply,
+        steps: [
+          {
+            index: 1,
+            label: `Create reminder ${title}`,
+            status: "completed",
+            detail: reply
+          }
+        ]
+      }
+    );
+  } catch (error) {
+    return createReply(
+      `I couldn't save that reminder automatically. Make sure Reminders is available and macOS allows automation for Jarvis here.`
+    );
+  }
+}
+
+async function executeShowReminders() {
+  if (process.platform !== "darwin") {
+    return createReply(`Reminder access is only wired for macOS right now.`);
+  }
+
+  const scriptLines = [
+    'tell application "Reminders"',
+    "set outputLines to {}",
+    "repeat with reminderList in lists",
+    "repeat with reminderItem in reminders of reminderList",
+    "if completed of reminderItem is false then",
+    'set dueText to ""',
+    "try",
+    "set dueValue to remind me date of reminderItem",
+    "if dueValue is not missing value then set dueText to (dueValue as string)",
+    "end try",
+    'set end of outputLines to ((name of reminderList as string) & "||" & (name of reminderItem as string) & "||" & dueText)',
+    "end if",
+    "end repeat",
+    "end repeat",
+    "set AppleScript's text item delimiters to linefeed",
+    "set outputText to outputLines as string",
+    'set AppleScript\'s text item delimiters to ""',
+    "return outputText",
+    "end tell"
+  ];
+
+  try {
+    const result = await runOsaScript(scriptLines, "AppleScript");
+    const reminders = String(result.stdout || "")
+      .split(/\r?\n/)
+      .map((line) => {
+        const [listName, title, dueText] = line.split("||");
+        return {
+          listName: String(listName || "").trim(),
+          title: String(title || "").trim(),
+          dueText: String(dueText || "").trim()
+        };
+      })
+      .filter((entry) => entry.title)
+      .slice(0, 8);
+
+    if (!reminders.length) {
+      return createReply(`You do not have any pending reminders right now.`, {
+        status: "completed"
+      });
+    }
+
+    const summary = reminders
+      .map((entry, index) =>
+        `${index + 1}. ${entry.title}${entry.dueText ? ` (${entry.dueText})` : ""}`
+      )
+      .join(" ");
+
+    rememberSessionContext({
+      lastIntentType: "showReminders"
+    });
+    return attachTask(
+      createReply(summary, {
+        status: "completed"
+      }),
+      {
+        title: "Reminders",
+        status: "completed",
+        summary,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: Date.now(),
+        currentStepIndex: 0,
+        currentStepLabel: "Read reminders",
+        currentDetail: summary,
+        steps: [
+          {
+            index: 1,
+            label: "Read reminders",
+            status: "completed",
+            detail: summary
+          }
+        ]
+      }
+    );
+  } catch (error) {
+    return createReply(
+      `I couldn't read your reminders automatically. Make sure Reminders is available and macOS allows automation for Jarvis here.`
+    );
+  }
+}
+
+async function executeCalendarCreate(intent) {
+  if (process.platform !== "darwin") {
+    return createReply(`Calendar events are only wired for macOS right now.`);
+  }
+
+  const title = String(intent.title || "").trim();
+  const startCandidate = intent.when ? new Date(intent.when) : null;
+  const startDate =
+    startCandidate && !Number.isNaN(startCandidate.getTime())
+      ? startCandidate
+      : parseScheduledDateTimeExpression(intent.whenExpression || "");
+  if (!title || !startDate || Number.isNaN(startDate.getTime())) {
+    return createReply(
+      `Tell me the time clearly, like "create calendar event project review tomorrow at 6 pm".`
+    );
+  }
+
+  const durationMinutes = Math.max(
+    5,
+    Number(intent.durationMinutes || DEFAULT_CALENDAR_EVENT_DURATION_MINUTES)
+  );
+  const endDate = new Date(startDate.getTime() + durationMinutes * 60_000);
+  const scriptLines = [
+    ...appleScriptDateSetupLines("startDateVar", startDate),
+    ...appleScriptDateSetupLines("endDateVar", endDate),
+    'tell application "Calendar"',
+    'if (count of calendars) is 0 then error "No calendar is available."',
+    "tell calendar 1",
+    `make new event with properties {summary:"${appleScriptString(title)}", start date:startDateVar, end date:endDateVar}`,
+    "end tell",
+    "end tell"
+  ];
+
+  try {
+    await runOsaScript(scriptLines, "AppleScript");
+    rememberSessionContext({
+      lastIntentType: "createCalendarEvent"
+    });
+    const reply = `Calendar event saved for ${formatScheduledDateTime(startDate)}.`;
+    return attachTask(
+      createReply(reply, {
+        status: "completed"
+      }),
+      {
+        title: "Calendar",
+        status: "completed",
+        summary: reply,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: Date.now(),
+        currentStepIndex: 0,
+        currentStepLabel: "Create event",
+        currentDetail: reply,
+        steps: [
+          {
+            index: 1,
+            label: `Create event ${title}`,
+            status: "completed",
+            detail: reply
+          }
+        ]
+      }
+    );
+  } catch (error) {
+    return createReply(
+      `I couldn't save that calendar event automatically. Make sure Calendar is available and macOS allows automation for Jarvis here.`
+    );
+  }
+}
+
+async function executeCalendarAgenda(intent) {
+  if (process.platform !== "darwin") {
+    return createReply(`Calendar access is only wired for macOS right now.`);
+  }
+
+  const range = dayRange(intent.day || "today");
+  const scriptLines = [
+    ...appleScriptDateSetupLines("rangeStart", range.start),
+    ...appleScriptDateSetupLines("rangeEnd", range.end),
+    'tell application "Calendar"',
+    "set outputLines to {}",
+    "repeat with calendarItem in calendars",
+    "repeat with eventItem in (every event of calendarItem whose start date >= rangeStart and start date < rangeEnd)",
+    'set end of outputLines to ((name of calendarItem as string) & "||" & (summary of eventItem as string) & "||" & ((start date of eventItem) as string))',
+    "end repeat",
+    "end repeat",
+    "set AppleScript's text item delimiters to linefeed",
+    "set outputText to outputLines as string",
+    'set AppleScript\'s text item delimiters to ""',
+    "return outputText",
+    "end tell"
+  ];
+
+  try {
+    const result = await runOsaScript(scriptLines, "AppleScript");
+    const entries = String(result.stdout || "")
+      .split(/\r?\n/)
+      .map((line) => {
+        const [calendarName, summary, startText] = line.split("||");
+        return {
+          calendarName: String(calendarName || "").trim(),
+          summary: String(summary || "").trim(),
+          startText: String(startText || "").trim()
+        };
+      })
+      .filter((entry) => entry.summary)
+      .slice(0, 8);
+
+    const label = String(intent.day || "today").trim().toLowerCase() === "tomorrow" ? "tomorrow" : "today";
+    if (!entries.length) {
+      return createReply(`You do not have any calendar events ${label}.`, {
+        status: "completed"
+      });
+    }
+
+    const reply = entries
+      .map((entry, index) => `${index + 1}. ${entry.summary} (${entry.startText})`)
+      .join(" ");
+    rememberSessionContext({
+      lastIntentType: "showCalendarAgenda"
+    });
+    return attachTask(
+      createReply(reply, {
+        status: "completed"
+      }),
+      {
+        title: "Calendar",
+        status: "completed",
+        summary: reply,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: Date.now(),
+        currentStepIndex: 0,
+        currentStepLabel: "Read agenda",
+        currentDetail: reply,
+        steps: [
+          {
+            index: 1,
+            label: `Show calendar ${label}`,
+            status: "completed",
+            detail: reply
+          }
+        ]
+      }
+    );
+  } catch (error) {
+    return createReply(
+      `I couldn't read your calendar automatically. Make sure Calendar is available and macOS allows automation for Jarvis here.`
+    );
+  }
+}
+
+async function executeEmailDraft(intent, config) {
+  const draft = buildEmailDraftUrl(intent, config);
+  try {
+    await openItem(draft.url, config.apps?.chrome ? { appName: config.apps.chrome } : {});
+  } catch (error) {
+    await openItem(draft.url);
+  }
+
+  rememberSessionContext({
+    lastIntentType: "emailDraft",
+    lastUrl: draft.url,
+    lastUrlLabel: `Email draft for ${intent.recipientLabel || intent.recipient}`
+  });
+
+  const reply = `Drafting an email to ${intent.recipientLabel || intent.recipient} in ${draft.label}.`;
+  return attachTask(
+    createReply(reply, {
+      status: "drafted"
+    }),
+    {
+      title: "Email draft",
+      status: "completed",
+      summary: reply,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      finishedAt: Date.now(),
+      currentStepIndex: 0,
+      currentStepLabel: "Open draft",
+      currentDetail: reply,
+      steps: [
+        {
+          index: 1,
+          label: `Draft email to ${intent.recipientLabel || intent.recipient}`,
+          status: "completed",
+          detail: reply
+        }
+      ]
+    }
+  );
+}
+
+async function executeCreateNote(intent) {
+  const note = await addAssistantNote(intent.text);
+  if (!note) {
+    return createReply(`Tell me what note to save.`);
+  }
+
+  const reply = `Note saved${note.createdAt ? ` at ${briefDateTime(note.createdAt)}` : ""}.`;
+  rememberSessionContext({
+    lastIntentType: "createNote"
+  });
+  return attachTask(
+    createReply(reply, {
+      status: "completed"
+    }),
+    {
+      title: "Note",
+      status: "completed",
+      summary: reply,
+      startedAt: note.createdAt || Date.now(),
+      updatedAt: note.createdAt || Date.now(),
+      finishedAt: note.createdAt || Date.now(),
+      currentStepIndex: 0,
+      currentStepLabel: "Save note",
+      currentDetail: reply,
+      steps: [
+        {
+          index: 1,
+          label: "Save note",
+          status: "completed",
+          detail: note.text
+        }
+      ]
+    }
+  );
+}
+
+async function executeShowNotes() {
+  const notes = (await readAssistantNotes()).slice(0, 5);
+  if (!notes.length) {
+    return createReply(`You do not have any saved notes yet.`, {
+      status: "completed"
+    });
+  }
+
+  const reply = notes
+    .map((note, index) => `${index + 1}. ${note.text}${note.createdAt ? ` (${briefDateTime(note.createdAt)})` : ""}`)
+    .join(" ");
+
+  rememberSessionContext({
+    lastIntentType: "showNotes"
+  });
+  return attachTask(
+    createReply(reply, {
+      status: "completed"
+    }),
+    {
+      title: "Notes",
+      status: "completed",
+      summary: reply,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      finishedAt: Date.now(),
+      currentStepIndex: 0,
+      currentStepLabel: "Read notes",
+      currentDetail: reply,
+      steps: [
+        {
+          index: 1,
+          label: "Read notes",
+          status: "completed",
+          detail: reply
+        }
+      ]
+    }
+  );
+}
+
+async function executeFileSearch(intent) {
+  if (process.platform !== "darwin") {
+    return createReply(`Local file search is only wired for macOS right now.`);
+  }
+
+  const query = String(intent.query || "").trim();
+  if (!query) {
+    return createReply(`Tell me which file name to look for.`);
+  }
+
+  let result = null;
+  try {
+    result = await runExecFile("/usr/bin/mdfind", ["-onlyin", os.homedir(), "-name", query]);
+  } catch (error) {
+    return createReply(`I couldn't search your files automatically right now.`);
+  }
+
+  const matches = String(result.stdout || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && fs.existsSync(line))
+    .slice(0, 5);
+
+  if (!matches.length) {
+    return createReply(`I couldn't find a file matching ${query}.`, {
+      status: "failed"
+    });
+  }
+
+  const firstMatch = matches[0];
+  if (intent.openFirst) {
+    try {
+      await openItem(firstMatch);
+    } catch (error) {
+      return createReply(
+        `I found ${path.basename(firstMatch)}, but I couldn't open it automatically from this session.`
+      );
+    }
+    rememberSessionContext({
+      lastIntentType: "findFile",
+      lastPath: firstMatch,
+      lastPathLabel: path.basename(firstMatch)
+    });
+    const reply =
+      matches.length === 1
+        ? `Opening ${path.basename(firstMatch)}.`
+        : `Opening ${path.basename(firstMatch)}. I also found ${matches.length - 1} other matches.`;
+    return attachTask(
+      createReply(reply, {
+        status: "completed"
+      }),
+      {
+        title: "File search",
+        status: "completed",
+        summary: reply,
+        startedAt: Date.now(),
+        updatedAt: Date.now(),
+        finishedAt: Date.now(),
+        currentStepIndex: 0,
+        currentStepLabel: "Open file",
+        currentDetail: firstMatch,
+        steps: [
+          {
+            index: 1,
+            label: `Open file ${query}`,
+            status: "completed",
+            detail: firstMatch
+          }
+        ]
+      }
+    );
+  }
+
+  const reply = matches
+    .map((match, index) => `${index + 1}. ${path.basename(match)} in ${path.dirname(match)}`)
+    .join(" ");
+  rememberSessionContext({
+    lastIntentType: "findFile",
+    lastPath: firstMatch,
+    lastPathLabel: path.basename(firstMatch)
+  });
+  return attachTask(
+    createReply(reply, {
+      status: "completed"
+    }),
+    {
+      title: "File search",
+      status: "completed",
+      summary: reply,
+      startedAt: Date.now(),
+      updatedAt: Date.now(),
+      finishedAt: Date.now(),
+      currentStepIndex: 0,
+      currentStepLabel: "Find files",
+      currentDetail: reply,
+      steps: [
+        {
+          index: 1,
+          label: `Find file ${query}`,
+          status: "completed",
+          detail: reply
+        }
+      ]
+    }
+  );
+}
+
+async function executeIntent(intent, config, runtime = {}) {
   if (isCloudMode()) {
     const cloudResult = executeCloudIntent(intent, config);
     if (cloudResult) {
@@ -7034,7 +8418,7 @@ async function executeIntent(intent, config) {
       });
     }
     case "plannedActions": {
-      return executePlannedSteps(intent.steps, config);
+      return executePlannedSteps(intent.steps, config, runtime);
     }
     case "settingsPanel": {
       return executeSettingsPanel(intent.panelKey);
@@ -7059,6 +8443,30 @@ async function executeIntent(intent, config) {
     }
     case "spotifyControl": {
       return executeSpotifyControl(intent.action, config);
+    }
+    case "createReminder": {
+      return executeReminderCreate(intent);
+    }
+    case "showReminders": {
+      return executeShowReminders();
+    }
+    case "createCalendarEvent": {
+      return executeCalendarCreate(intent);
+    }
+    case "showCalendarAgenda": {
+      return executeCalendarAgenda(intent);
+    }
+    case "emailDraft": {
+      return executeEmailDraft(intent, config);
+    }
+    case "createNote": {
+      return executeCreateNote(intent);
+    }
+    case "showNotes": {
+      return executeShowNotes();
+    }
+    case "findFile": {
+      return executeFileSearch(intent);
     }
     case "knowledge": {
       rememberSessionContext({
@@ -7410,7 +8818,8 @@ async function executeIntent(intent, config) {
           contact: foundContact,
           message: intent.message
         },
-        config
+        config,
+        runtime
       );
     }
     default:
@@ -7418,7 +8827,7 @@ async function executeIntent(intent, config) {
   }
 }
 
-async function processCommand(rawText, metadata = {}) {
+async function processCommand(rawText, metadata = {}, runtime = {}) {
   clearExpiredPending();
   const config = readConfig();
   const language = effectiveConversationLanguage(rawText);
@@ -7514,7 +8923,7 @@ async function processCommand(rawText, metadata = {}) {
     if (isAffirmative(rawText)) {
       const pending = state.pendingAction;
       state.pendingAction = null;
-      return executeIntent(pending, config);
+      return executeIntent(pending, config, runtime);
     }
     if (isNegative(rawText)) {
       state.pendingAction = null;
@@ -7549,7 +8958,7 @@ async function processCommand(rawText, metadata = {}) {
         );
       }
 
-      return executePlannedSteps(planned.steps, config);
+      return executePlannedSteps(planned.steps, config, runtime);
     }
 
     if (planned?.mode === "quota") {
@@ -7781,7 +9190,7 @@ async function processCommand(rawText, metadata = {}) {
     return intent;
   }
   return applyTurnConversationLanguage(
-    await executeIntent(intent, config),
+    await executeIntent(intent, config, runtime),
     rawText
   );
 }
@@ -7829,10 +9238,18 @@ function streamableKnowledgeCandidate(rawText, metadata = {}) {
 async function streamCommandResponse(response, transcript, commandMetadata) {
   const rawTranscript = String(commandMetadata.rawTranscript || transcript).trim() || transcript;
   const streamCandidate = streamableKnowledgeCandidate(transcript, commandMetadata);
+  const runtime = {
+    onTaskUpdate: (task) => {
+      writeStreamEvent(response, {
+        type: "task",
+        payload: task
+      });
+    }
+  };
 
   if (!streamCandidate) {
     const result = applyTurnConversationLanguage(
-      await processCommand(transcript, commandMetadata),
+      await processCommand(transcript, commandMetadata, runtime),
       rawTranscript
     );
     rememberCommandExchange(transcript, result.reply);
