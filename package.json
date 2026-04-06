@@ -2,14 +2,97 @@
   "name": "jarvis-voice-assistant",
   "version": "0.1.0",
   "private": true,
+  "main": "electron/main.js",
   "description": "Voice-first local desktop assistant with a JARVIS-style interface.",
   "engines": {
     "node": ">=20"
   },
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "prepare:desktop-assets": "node scripts/prepare-desktop-assets.js",
+    "desktop": "npm run prepare:desktop-assets && electron .",
+    "dist": "npm run prepare:desktop-assets && electron-builder",
+    "dist:dir": "electron-builder --dir",
+    "dist:mac": "npm run prepare:desktop-assets && electron-builder --mac dmg zip",
+    "dist:win": "electron-builder --win portable zip",
+    "dist:win:installer": "electron-builder --win nsis zip"
   },
   "dependencies": {
     "kokoro-js": "^1.2.1"
+  },
+  "devDependencies": {
+    "electron": "^33.2.1",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.jarvis.desktop",
+    "productName": "Jarvis",
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "afterSign": "scripts/after-sign-mac.js",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**/*",
+      "node_modules/kokoro-js/voices/**/*",
+      "node_modules/@huggingface/transformers/.cache/**/*"
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "static/**/*",
+      "config/**/*",
+      "data/**/*",
+      ".env",
+      "server.js",
+      "package.json",
+      "package-lock.json"
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": false,
+      "icon": "build/icon.icns",
+      "extraFiles": [
+        {
+          "from": "native-overlay/dist/JarvisOverlay",
+          "to": "MacOS/JarvisOverlay",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Jarvis needs microphone access so you can speak commands.",
+        "NSSpeechRecognitionUsageDescription": "Jarvis needs speech recognition access so it can understand your voice commands."
+      },
+      "target": [
+        "dmg",
+        "zip"
+      ]
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        "portable",
+        "zip"
+      ],
+      "artifactName": "${productName}-${version}-windows-${arch}.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "artifactName": "${productName}-${version}-linux-${arch}.${ext}"
+    },
+    "dmg": {
+      "writeUpdateInfo": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    }
   }
 }

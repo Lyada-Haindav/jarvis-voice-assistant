@@ -19,6 +19,21 @@
 
       <main class="layout">
         <section class="hero-panel">
+          <div class="hero-console">
+            <div class="hero-presence">
+              <span class="hero-pill" id="heroModeBadge">Desktop mode</span>
+              <span class="hero-pill" id="heroStatusBadge">Idle</span>
+              <span class="hero-pill" id="heroRecognitionBadge">Mic off · EN</span>
+            </div>
+            <div class="hero-actions" id="heroActions">
+              <button id="dynamicIslandToggle" class="hero-action" type="button">Island</button>
+              <button id="desktopSetupToggle" class="hero-action" type="button">Setup</button>
+              <button id="desktopVoiceToggle" class="hero-action" type="button">Voice</button>
+              <button id="desktopCommandsToggle" class="hero-action" type="button">Commands</button>
+              <button id="desktopHistoryToggle" class="hero-action" type="button">History</button>
+            </div>
+          </div>
+
           <div class="scan-ring ring-one"></div>
           <div class="scan-ring ring-two"></div>
           <canvas id="globeCanvas" aria-hidden="true"></canvas>
@@ -51,6 +66,34 @@
         </section>
 
         <aside class="control-stack">
+          <section class="card" id="desktopSetupCard" hidden>
+            <div class="card-header">
+              <h3>Desktop Setup</h3>
+              <span class="mini-label" id="desktopSetupBadge">Browser</span>
+            </div>
+
+            <div class="desktop-permission-list" id="desktopPermissionList"></div>
+
+            <div class="button-row">
+              <button id="desktopMicButton" class="primary" type="button">Allow Microphone</button>
+              <button id="desktopAccessibilityButton" type="button">Accessibility</button>
+            </div>
+
+            <div class="button-row">
+              <button id="desktopAutomationButton" type="button">Automation</button>
+              <button id="desktopRefreshButton" type="button">Refresh</button>
+            </div>
+
+            <label class="toggle desktop-toggle">
+              <input type="checkbox" id="desktopLaunchAtLogin" />
+              <span>Launch Jarvis when this laptop signs in</span>
+            </label>
+
+            <p class="voice-note" id="desktopSetupNote">
+              Install the desktop app on each laptop, allow the requested permissions, and Jarvis will use that laptop's own apps and controls.
+            </p>
+          </section>
+
           <section class="card">
             <div class="card-header">
               <h3>Voice Control</h3>

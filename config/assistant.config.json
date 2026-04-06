@@ -1,10 +1,11 @@
 {
   "assistantName": "Jarvis",
-  "messageDelivery": "draft",
+  "conversationLanguage": "english",
+  "messageDelivery": "autoSend",
   "knowledge": {
     "enabled": true,
-    "provider": "auto",
-    "model": "gemini-2.5-flash",
+    "provider": "openrouter",
+    "model": "openai/gpt-4o-mini",
     "useGoogleSearch": true
   },
   "contacts": {
@@ -28,7 +29,8 @@
     "github": "https://github.com",
     "chatgpt": "https://chatgpt.com",
     "gmail": "https://mail.google.com",
-    "whatsappweb": "https://web.whatsapp.com"
+    "whatsappweb": "https://web.whatsapp.com",
+    "spotify": "https://open.spotify.com"
   },
   "folders": {
     "downloads": "~/Downloads",

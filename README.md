@@ -52,8 +52,52 @@ Public-device note:
 
 - the hosted app UI works across phones, tablets, and laptops
 - world knowledge and voice UI can run publicly in supported browsers
-- The included Render blueprint sets `KOKORO_SERVER_TTS=0`, so hosted deploys use browser speech by default while local runs keep Kokoro
-- macOS-only device control, Shortcuts, WhatsApp desktop automation, and local app launching remain local-machine features and will not work the same way on Render
+- The included Render blueprint sets `KOKORO_SERVER_TTS=0`, and Jarvis now defaults to system/browser speech unless you explicitly enable server-side voice
+- hosted deploys now open browser-safe actions on the user's device, such as Google searches, websites, WhatsApp Web drafts, and Spotify Web
+- native laptop controls like Wi-Fi, power, shortcuts, local folders, and desktop app automation still need a local desktop runtime and are not available from a plain hosted website on every device
+
+## Desktop app
+
+If you want Jarvis to run as an installable desktop app on a laptop:
+
+1. Install dependencies with `npm install`
+2. Start the desktop shell with `npm run desktop`
+3. Build installers with `npm run dist`
+
+The desktop app wraps the existing Jarvis UI in Electron and, on macOS, now also builds a native notch-style overlay helper automatically. That helper sits at the top center of the screen, stays alive across spaces, and mirrors Jarvis listening/speaking state while the main app runs in the background.
+
+For the advanced macOS experience:
+
+1. Open Jarvis once
+2. Press `Start Voice`
+3. Turn on `Menu bar only mode`
+4. Leave Jarvis running in the menu bar
+
+Then Jarvis can wake from other apps with `Hey Jarvis`, and the native overlay expands near the notch while it listens or speaks.
+
+### Premium Hindi and Telugu voice
+
+If you want stronger Hindi and Telugu speech on any device, add a Gemini API key in `.env`:
+
+```bash
+GEMINI_API_KEY=your_key_here
+```
+
+Jarvis will then use:
+
+- `English` -> Kokoro
+- `Hindi` -> Gemini premium voice
+- `Telugu` -> Gemini premium voice
+- multilingual microphone transcription -> Gemini for `auto`, `Hindi`, and `Telugu`, with local Whisper fallback
+
+Optional tuning:
+
+```bash
+JARVIS_GEMINI_TTS_MODEL=gemini-2.5-flash-preview-tts
+JARVIS_GEMINI_ASR_MODEL=gemini-2.5-flash
+JARVIS_GEMINI_TTS_FEMALE_VOICE=Aoede
+JARVIS_GEMINI_TTS_MALE_VOICE=Kore
+```
 
 ## What it can do
 

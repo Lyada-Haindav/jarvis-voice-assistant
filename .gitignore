@@ -2,4 +2,9 @@
 node_modules
 .DS_Store
 .clang-module-cache
+.swift-module-cache
+dist
+native-overlay/dist
 data/user-profile.json
+data/assistant-memory.json
+data/scheduled-messages.json

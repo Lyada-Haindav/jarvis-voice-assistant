@@ -5,17 +5,74 @@ const os = require("os");
 const path = require("path");
 const { exec, execFile } = require("child_process");
 
-const HOST = process.env.HOST || (process.env.RENDER ? "0.0.0.0" : "127.0.0.1");
-const PORT = Number(process.env.PORT || 3000);
+const ENV_PATH = path.join(__dirname, ".env");
+loadDotEnv();
+
+const APP_MODE = normalizeAppMode(process.env.JARVIS_MODE);
+const LOCAL_AGENT_ENABLED = process.env.JARVIS_LOCAL_AGENT === "1";
+const LOCAL_AGENT_HOST = process.env.JARVIS_AGENT_HOST || "127.0.0.1";
+const LOCAL_AGENT_PORT = Number(process.env.JARVIS_AGENT_PORT || 3210);
+const LOCAL_AGENT_BASE_URL =
+  process.env.JARVIS_LOCAL_AGENT_URL || `http://${LOCAL_AGENT_HOST}:${LOCAL_AGENT_PORT}`;
+const HOST =
+  process.env.HOST ||
+  (APP_MODE === "agent"
+    ? LOCAL_AGENT_HOST
+    : process.env.RENDER
+      ? "0.0.0.0"
+      : "127.0.0.1");
+const PORT = Number(process.env.PORT || (APP_MODE === "agent" ? LOCAL_AGENT_PORT : 3000));
 const PUBLIC_DIR = path.join(__dirname, "static");
 const CONFIG_PATH = path.join(__dirname, "config", "assistant.config.json");
-const ENV_PATH = path.join(__dirname, ".env");
 const USER_PROFILE_PATH = path.join(__dirname, "data", "user-profile.json");
+const ASSISTANT_MEMORY_PATH = path.join(__dirname, "data", "assistant-memory.json");
+const SCHEDULED_MESSAGES_PATH = path.join(__dirname, "data", "scheduled-messages.json");
 const TTS_CACHE_DIR = path.join(os.tmpdir(), "jarvis-tts");
+const ADDRESS_BOOK_DIR = path.join(os.homedir(), "Library", "Application Support", "AddressBook");
 const CONFIRMATION_TTL_MS = 60_000;
+const SCHEDULED_MESSAGE_POLL_MS = 15_000;
 const MAX_KNOWLEDGE_TURNS = 8;
 const MAX_CONVERSATION_TURNS = 20;
+const PROMPT_CONVERSATION_TURNS = 6;
+const PROMPT_KNOWLEDGE_TURNS = 4;
+const PROMPT_TURN_CHAR_LIMIT = 220;
+const OPENROUTER_FAST_MAX_TOKENS = 120;
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const PREMIUM_TTS_MODEL =
+  process.env.JARVIS_GEMINI_TTS_MODEL || "gemini-2.5-flash-preview-tts";
+const PREMIUM_ASR_MODEL =
+  process.env.JARVIS_GEMINI_ASR_MODEL || "gemini-2.5-flash";
+const PREMIUM_TTS_SAMPLE_RATE = 24000;
+const PREMIUM_TTS_VOICES = {
+  female: process.env.JARVIS_GEMINI_TTS_FEMALE_VOICE || "Aoede",
+  male: process.env.JARVIS_GEMINI_TTS_MALE_VOICE || "Kore"
+};
+const ASR_MODEL_IDS = {
+  english: process.env.JARVIS_ASR_ENGLISH_MODEL || "Xenova/whisper-tiny.en",
+  multilingual: process.env.JARVIS_ASR_MULTILINGUAL_MODEL || "Xenova/whisper-tiny"
+};
+const ASR_SAMPLE_RATE = 16000;
+const ASR_CHUNK_LENGTH_S = 3;
+const ASR_STRIDE_LENGTH_S = 1;
+const ASR_MAX_INPUT_SECONDS = 4.5;
+const ASR_TARGET_PEAK = 0.82;
+const ASR_TARGET_RMS = 0.16;
+const ASR_MAX_GAIN = 6;
+const ASR_MIN_TRIM_THRESHOLD = 0.01;
+const ASR_MAX_TRIM_THRESHOLD = 0.045;
+const ASR_TRIM_PADDING_MS = 180;
+const PACKAGED_APP_UNPACKED_DIR = process.resourcesPath
+  ? path.join(process.resourcesPath, "app.asar.unpacked")
+  : "";
+const PACKAGED_TRANSFORMERS_CACHE_DIR = PACKAGED_APP_UNPACKED_DIR
+  ? path.join(
+      PACKAGED_APP_UNPACKED_DIR,
+      "node_modules",
+      "@huggingface",
+      "transformers",
+      ".cache"
+    )
+  : "";
 
 const MIME_TYPES = {
   ".css": "text/css; charset=utf-8",
@@ -25,9 +82,39 @@ const MIME_TYPES = {
   ".svg": "image/svg+xml; charset=utf-8"
 };
 
+function normalizeAppMode(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  if (normalized === "cloud" || normalized === "agent") {
+    return normalized;
+  }
+  if (!normalized && process.env.RENDER) {
+    return "cloud";
+  }
+  return "desktop";
+}
+
+function isAgentMode() {
+  return APP_MODE === "agent";
+}
+
+function isCloudMode() {
+  return APP_MODE === "cloud";
+}
+
 const NATIVE_TTS_VOICES = {
   female: ["Flo (English (US))", "Samantha", "Karen", "Moira", "Tessa"],
   male: ["Eddy (English (US))", "Daniel"]
+};
+
+const NATIVE_MULTILINGUAL_TTS_VOICES = {
+  hindi: {
+    female: ["Lekha"],
+    male: ["Lekha"]
+  },
+  telugu: {
+    female: ["Geeta"],
+    male: ["Geeta"]
+  }
 };
 
 const KOKORO_TTS_VOICES = {
@@ -41,8 +128,382 @@ const KOKORO_TTS_VOICES = {
   }
 };
 
+const DEVANAGARI_DIGITS = {
+  "०": "0",
+  "१": "1",
+  "२": "2",
+  "३": "3",
+  "४": "4",
+  "५": "5",
+  "६": "6",
+  "७": "7",
+  "८": "8",
+  "९": "9"
+};
+
+const TELUGU_DIGITS = {
+  "౦": "0",
+  "౧": "1",
+  "౨": "2",
+  "౩": "3",
+  "౪": "4",
+  "౫": "5",
+  "౬": "6",
+  "౭": "7",
+  "౮": "8",
+  "౯": "9"
+};
+
+const DEVANAGARI_PHONEMES = {
+  vowels: {
+    "अ": "a",
+    "आ": "aː",
+    "इ": "i",
+    "ई": "iː",
+    "उ": "u",
+    "ऊ": "uː",
+    "ऋ": "ɾɪ",
+    "ॠ": "ɾiː",
+    "ऌ": "ɭɪ",
+    "ॡ": "ɭiː",
+    "ए": "eː",
+    "ऐ": "ai",
+    "ओ": "oː",
+    "औ": "au",
+    "ऑ": "ɔː",
+    "ॐ": "oː m"
+  },
+  matras: {
+    "ा": "aː",
+    "ि": "i",
+    "ी": "iː",
+    "ु": "u",
+    "ू": "uː",
+    "ृ": "ɾɪ",
+    "ॄ": "ɾiː",
+    "ॢ": "ɭɪ",
+    "ॣ": "ɭiː",
+    "े": "eː",
+    "ै": "ai",
+    "ो": "oː",
+    "ौ": "au",
+    "ॅ": "ɛ",
+    "ॉ": "ɔː"
+  },
+  consonants: {
+    "क": "k",
+    "ख": "kʰ",
+    "ग": "g",
+    "घ": "gʱ",
+    "ङ": "ŋ",
+    "च": "tʃ",
+    "छ": "tʃʰ",
+    "ज": "dʒ",
+    "झ": "dʒʱ",
+    "ञ": "ɲ",
+    "ट": "ʈ",
+    "ठ": "ʈʰ",
+    "ड": "ɖ",
+    "ढ": "ɖʱ",
+    "ण": "ɳ",
+    "त": "t̪",
+    "थ": "t̪ʰ",
+    "द": "d̪",
+    "ध": "d̪ʱ",
+    "न": "n",
+    "प": "p",
+    "फ": "pʰ",
+    "ब": "b",
+    "भ": "bʱ",
+    "म": "m",
+    "य": "j",
+    "र": "ɾ",
+    "ल": "l",
+    "व": "ʋ",
+    "श": "ʃ",
+    "ष": "ʂ",
+    "स": "s",
+    "ह": "h",
+    "ळ": "ɭ",
+    "क़": "q",
+    "ख़": "x",
+    "ग़": "ɣ",
+    "ज़": "z",
+    "ड़": "ɽ",
+    "ढ़": "ɽʱ",
+    "फ़": "f"
+  },
+  nuktaConsonants: {
+    "क": "q",
+    "ख": "x",
+    "ग": "ɣ",
+    "ज": "z",
+    "ड": "ɽ",
+    "ढ": "ɽʱ",
+    "फ": "f"
+  },
+  nasalGroups: {
+    velar: new Set(["क", "ख", "ग", "घ", "ङ", "क़", "ख़", "ग़"]),
+    palatal: new Set(["च", "छ", "ज", "झ", "ञ", "ज़"]),
+    retroflex: new Set(["ट", "ठ", "ड", "ढ", "ण", "ड़", "ढ़"]),
+    dental: new Set(["त", "थ", "द", "ध", "न"]),
+    labial: new Set(["प", "फ", "ब", "भ", "म", "फ़"])
+  },
+  digits: DEVANAGARI_DIGITS,
+  virama: "्",
+  nukta: "़",
+  anusvara: new Set(["ं", "ँ"]),
+  visarga: "ः",
+  inherentVowel: "ə"
+};
+
+const TELUGU_PHONEMES = {
+  vowels: {
+    "అ": "a",
+    "ఆ": "aː",
+    "ఇ": "i",
+    "ఈ": "iː",
+    "ఉ": "u",
+    "ఊ": "uː",
+    "ఋ": "ɾɪ",
+    "ౠ": "ɾiː",
+    "ఎ": "e",
+    "ఏ": "eː",
+    "ఐ": "ai",
+    "ఒ": "o",
+    "ఓ": "oː",
+    "ఔ": "au"
+  },
+  matras: {
+    "ా": "aː",
+    "ి": "i",
+    "ీ": "iː",
+    "ు": "u",
+    "ూ": "uː",
+    "ృ": "ɾɪ",
+    "ౄ": "ɾiː",
+    "ె": "e",
+    "ే": "eː",
+    "ై": "ai",
+    "ొ": "o",
+    "ో": "oː",
+    "ౌ": "au"
+  },
+  consonants: {
+    "క": "k",
+    "ఖ": "kʰ",
+    "గ": "g",
+    "ఘ": "gʱ",
+    "ఙ": "ŋ",
+    "చ": "tʃ",
+    "ఛ": "tʃʰ",
+    "జ": "dʒ",
+    "ఝ": "dʒʱ",
+    "ఞ": "ɲ",
+    "ట": "ʈ",
+    "ఠ": "ʈʰ",
+    "డ": "ɖ",
+    "ఢ": "ɖʱ",
+    "ణ": "ɳ",
+    "త": "t̪",
+    "థ": "t̪ʰ",
+    "ద": "d̪",
+    "ధ": "d̪ʱ",
+    "న": "n",
+    "ప": "p",
+    "ఫ": "pʰ",
+    "బ": "b",
+    "భ": "bʱ",
+    "మ": "m",
+    "య": "j",
+    "ర": "ɾ",
+    "ల": "l",
+    "వ": "ʋ",
+    "శ": "ʃ",
+    "ష": "ʂ",
+    "స": "s",
+    "హ": "h",
+    "ళ": "ɭ",
+    "ఱ": "ɽ"
+  },
+  nuktaConsonants: {},
+  nasalGroups: {
+    velar: new Set(["క", "ఖ", "గ", "ఘ", "ఙ"]),
+    palatal: new Set(["చ", "ఛ", "జ", "ఝ", "ఞ"]),
+    retroflex: new Set(["ట", "ఠ", "డ", "ఢ", "ణ", "ఱ", "ళ"]),
+    dental: new Set(["త", "థ", "ద", "ధ", "న"]),
+    labial: new Set(["ప", "ఫ", "బ", "భ", "మ"])
+  },
+  digits: TELUGU_DIGITS,
+  virama: "్",
+  nukta: "",
+  anusvara: new Set(["ం"]),
+  visarga: "ః",
+  inherentVowel: "a"
+};
+
+const DEVANAGARI_SCRIPT_REGEX = /[\u0900-\u097F]/u;
+const TELUGU_SCRIPT_REGEX = /[\u0C00-\u0C7F]/u;
+const CONVERSATION_LANGUAGE_CODES = {
+  auto: "auto",
+  english: "en-IN",
+  hindi: "hi-IN",
+  telugu: "te-IN"
+};
+const LOCALIZED_RESPONSE_TEMPLATES = {
+  cancelled: {
+    english: "Cancelled.",
+    hindi: "रद्द कर दिया।",
+    telugu: "రద్దు చేశాను."
+  },
+  listening: {
+    english: "I'm listening.",
+    hindi: "मैं सुन रहा हूँ।",
+    telugu: "నేను వింటున్నాను."
+  },
+  noPendingAction: {
+    english: "There isn't a pending action right now. Ask me something or give me a command.",
+    hindi: "अभी कोई pending action नहीं है। मुझसे कुछ पूछिए या कोई command दीजिए।",
+    telugu: "ఇప్పుడు pending action ఏదీ లేదు. నన్ను ఏదైనా అడగండి లేదా ఒక command చెప్పండి."
+  },
+  tellMessageToSend: {
+    english: ({ contact }) => `Tell me what message to send to ${contact}.`,
+    hindi: ({ contact }) => `${contact} को क्या message भेजना है, वह बताइए।`,
+    telugu: ({ contact }) => `${contact}కి ఏ message పంపాలో చెప్పండి.`
+  },
+  contactChoicePrompt: {
+    english: ({ spokenName, items }) =>
+      `I found multiple matches for "${spokenName}". ${items} Say the number you want, say the contact name, or say the last 4 digits.`,
+    hindi: ({ spokenName, items }) =>
+      `"${spokenName}" के लिए मुझे कई matches मिले। ${items} जो number चाहिए वह बोलिए, या contact का नाम बोलिए, या नंबर के आख़िरी 4 digits बोलिए।`,
+    telugu: ({ spokenName, items }) =>
+      `"${spokenName}" కోసం నాకు చాలా matches దొరికాయి. ${items} మీకు కావాల్సిన number చెప్పండి, లేదా contact పేరు చెప్పండి, లేదా last 4 digits చెప్పండి.`
+  },
+  contactChoiceItem: {
+    english: ({ index, label, suffix }) =>
+      `${index + 1}. ${label}${suffix ? ` ending ${suffix}` : ""}`,
+    hindi: ({ index, label, suffix }) =>
+      `${index + 1}. ${label}${suffix ? `, नंबर ${suffix} पर खत्म` : ""}`,
+    telugu: ({ index, label, suffix }) =>
+      `${index + 1}. ${label}${suffix ? `, ${suffix}తో ముగిసే నంబర్` : ""}`
+  },
+  readyWhatsapp: {
+    english: ({ delivery, contact, message, suffix }) =>
+      `Ready to ${delivery === "autoSend" ? "send" : "draft"} a WhatsApp message to ${contact}${
+        suffix ? ` ending ${suffix}` : ""
+      }: "${message}". Say yes to continue or no to cancel.`,
+    hindi: ({ delivery, contact, message, suffix }) =>
+      `${contact}${suffix ? `, नंबर ${suffix} पर खत्म` : ""} को WhatsApp message ${
+        delivery === "autoSend" ? "भेजने" : "draft करने"
+      } के लिए तैयार हूँ: "${message}". आगे बढ़ने के लिए हाँ कहिए या रद्द करने के लिए नहीं कहिए।`,
+    telugu: ({ delivery, contact, message, suffix }) =>
+      `${contact}${suffix ? `, ${suffix}తో ముగిసే నంబర్` : ""}కి WhatsApp message ${
+        delivery === "autoSend" ? "పంపడానికి" : "draft చేయడానికి"
+      } సిద్ధంగా ఉంది: "${message}". కొనసాగాలంటే అవును చెప్పండి, రద్దు చేయాలంటే కాదు చెప్పండి.`
+  },
+  whatsappDraftReady: {
+    english: ({ contact }) => `WhatsApp is open with the message drafted for ${contact}.`,
+    hindi: ({ contact }) => `${contact} के लिए WhatsApp draft तैयार है।`,
+    telugu: ({ contact }) => `${contact} కోసం WhatsApp draft సిద్ధంగా ఉంది.`
+  },
+  whatsappSent: {
+    english: ({ contact }) => `Message sent to ${contact}.`,
+    hindi: ({ contact }) => `${contact} को message भेज दिया।`,
+    telugu: ({ contact }) => `${contact}కి message పంపించాను.`
+  },
+  whatsappAutoSendPermission: {
+    english:
+      "I opened the WhatsApp draft, but auto-send needs macOS Accessibility and Automation permissions to work cleanly.",
+    hindi:
+      "मैंने WhatsApp draft खोल दिया, लेकिन auto-send के लिए macOS Accessibility और Automation permissions चाहिए।",
+    telugu:
+      "నేను WhatsApp draft తెరిచాను, కానీ auto-send సరిగ్గా పనిచేయడానికి macOS Accessibility మరియు Automation permissions కావాలి."
+  },
+  contactsPermissionResolve: {
+    english: ({ contact }) =>
+      `I need macOS Contacts permission to automatically find ${contact}. Allow Contacts access, or save that contact with a phone number.`,
+    hindi: ({ contact }) =>
+      `${contact} को अपने आप ढूंढने के लिए मुझे macOS Contacts permission चाहिए। Contacts access दें, या उस contact को phone number के साथ save करें।`,
+    telugu: ({ contact }) =>
+      `${contact}ని ఆటోమేటిక్‌గా కనుగొనడానికి నాకు macOS Contacts permission కావాలి. Contacts access ఇవ్వండి, లేదా ఆ contactని phone numberతో save చేయండి.`
+  },
+  contactsLookupResolveFailed: {
+    english: ({ contact }) =>
+      `I couldn't look up ${contact} in Contacts right now. Try again, or save the number directly in config/assistant.config.json.`,
+    hindi: ({ contact }) =>
+      `मैं अभी Contacts में ${contact} को नहीं देख पाया। फिर से कोशिश कीजिए, या number को सीधे config/assistant.config.json में save कीजिए।`,
+    telugu: ({ contact }) =>
+      `ఇప్పుడే Contactsలో ${contact}ను చూడలేకపోయాను. మళ్లీ ప్రయత్నించండి, లేదా numberని నేరుగా config/assistant.config.jsonలో save చేయండి.`
+  },
+  contactsPhoneMissing: {
+    english: ({ contact }) =>
+      `I couldn't find a real phone number for ${contact} automatically. Save the contact in Contacts with a mobile number, or add the phone number in config/assistant.config.json.`,
+    hindi: ({ contact }) =>
+      `मुझे ${contact} के लिए अपने आप सही phone number नहीं मिला। Contact को Contacts में mobile number के साथ save करें, या phone number को config/assistant.config.json में जोड़ें।`,
+    telugu: ({ contact }) =>
+      `${contact} కోసం నాకు ఆటోమేటిక్‌గా సరైన phone number దొరకలేదు. Contactని Contactsలో mobile numberతో save చేయండి, లేదా phone numberని config/assistant.config.jsonలో జోడించండి.`
+  },
+  contactsPermissionFind: {
+    english: ({ spokenName }) =>
+      `I need macOS Contacts permission to find "${spokenName}". Allow Contacts access for this app or add the contact in config/assistant.config.json.`,
+    hindi: ({ spokenName }) =>
+      `"${spokenName}" को ढूंढने के लिए मुझे macOS Contacts permission चाहिए। इस app को Contacts access दें, या contact को config/assistant.config.json में जोड़ें।`,
+    telugu: ({ spokenName }) =>
+      `"${spokenName}"ను కనుగొనడానికి నాకు macOS Contacts permission కావాలి. ఈ appకి Contacts access ఇవ్వండి, లేదా contactని config/assistant.config.jsonలో జోడించండి.`
+  },
+  contactsLookupFailed: {
+    english: ({ spokenName }) =>
+      `I couldn't look up "${spokenName}" in Mac Contacts right now. Add the contact in config/assistant.config.json if you want a guaranteed match.`,
+    hindi: ({ spokenName }) =>
+      `मैं अभी Mac Contacts में "${spokenName}" को नहीं देख पाया। Guaranteed match के लिए contact को config/assistant.config.json में जोड़ दीजिए।`,
+    telugu: ({ spokenName }) =>
+      `ఇప్పుడే Mac Contactsలో "${spokenName}"ను చూడలేకపోయాను. Guaranteed match కోసం contactని config/assistant.config.jsonలో జోడించండి.`
+  },
+  contactsNotFound: {
+    english: ({ spokenName }) =>
+      `I couldn't find "${spokenName}" in your configured contacts or Mac Contacts. Add the contact in Contacts or in config/assistant.config.json first.`,
+    hindi: ({ spokenName }) =>
+      `मुझे "${spokenName}" आपके configured contacts या Mac Contacts में नहीं मिला। पहले contact को Contacts में या config/assistant.config.json में जोड़ें।`,
+    telugu: ({ spokenName }) =>
+      `మీ configured contacts లేదా Mac Contactsలో "${spokenName}" నాకు కనిపించలేదు. ముందుగా contactని Contactsలో లేదా config/assistant.config.jsonలో జోడించండి.`
+  },
+  languageSet: {
+    english: ({ label }) =>
+      label === "Auto"
+        ? "Okay. I will follow your language automatically."
+        : `Okay. I will talk with you in ${label}.`,
+    hindi: ({ label }) =>
+      label === "Auto"
+        ? "ठीक है। अब मैं आपकी भाषा अपने आप follow करूँगा।"
+        : `ठीक है। अब मैं आपसे ${label} में बात करूँगा।`,
+    telugu: ({ label }) =>
+      label === "Auto"
+        ? "సరే. ఇకమీదట మీరు ఏ భాషలో మాట్లాడితే దానిని నేనే follow అవుతాను."
+        : `సరే. ఇకమీదట నేను మీతో ${label}లో మాట్లాడుతాను.`
+  },
+  readyScheduledWhatsapp: {
+    english: ({ contact, message, when, suffix }) =>
+      `Ready to schedule a WhatsApp message to ${contact}${suffix ? ` ending ${suffix}` : ""} for ${when}: "${message}". Say yes to save it or no to cancel.`,
+    hindi: ({ contact, message, when, suffix }) =>
+      `${contact}${suffix ? `, नंबर ${suffix} पर खत्म` : ""} को ${when} के लिए WhatsApp message schedule करने के लिए तैयार हूँ: "${message}". Save करने के लिए हाँ कहिए या cancel करने के लिए नहीं कहिए।`,
+    telugu: ({ contact, message, when, suffix }) =>
+      `${contact}${suffix ? `, ${suffix}తో ముగిసే నంబర్` : ""}కి ${when} కోసం WhatsApp message schedule చేయడానికి సిద్ధంగా ఉన్నాను: "${message}". Save చేయాలంటే అవును చెప్పండి, cancel చేయాలంటే కాదు చెప్పండి.`
+  },
+  scheduledWhatsappSaved: {
+    english: ({ contact, when }) => `Scheduled a WhatsApp message to ${contact} for ${when}.`,
+    hindi: ({ contact, when }) => `${contact}కు ${when} కోసం WhatsApp message schedule कर दिया।`,
+    telugu: ({ contact, when }) => `${contact}కి ${when} కోసం WhatsApp message schedule చేశాను.`
+  },
+  scheduledMessagesEmpty: {
+    english: "There are no pending scheduled messages right now.",
+    hindi: "अभी कोई pending scheduled message नहीं है।",
+    telugu: "ఇప్పుడే pending scheduled messages ఏవీ లేవు."
+  }
+};
+
 const DEFAULT_CONFIG = {
   assistantName: "Jarvis",
+  conversationLanguage: "english",
   messageDelivery: "draft",
   knowledge: {
     enabled: true,
@@ -71,7 +532,8 @@ const DEFAULT_CONFIG = {
     github: "https://github.com",
     chatgpt: "https://chatgpt.com",
     gmail: "https://mail.google.com",
-    whatsappweb: "https://web.whatsapp.com"
+    whatsappweb: "https://web.whatsapp.com",
+    spotify: "https://open.spotify.com"
   },
   folders: {
     downloads: "~/Downloads",
@@ -243,6 +705,7 @@ function createSessionContext() {
     lastWhatsappMessage: "",
     lastUserCommand: "",
     lastAssistantReply: "",
+    preferredLanguage: "auto",
     updatedAt: 0
   };
 }
@@ -252,15 +715,28 @@ const state = {
   knowledgeHistory: [],
   conversationHistory: [],
   sessionContext: createSessionContext(),
+  scheduledMessages: [],
+  scheduledMessageTimer: null,
+  scheduledMessageInFlight: new Set(),
   kokoroModulePromise: null,
   kokoroTtsPromise: null,
   kokoroWarmupPromise: null,
   kokoroStatus: "idle",
   kokoroLastError: "",
-  speechQueue: Promise.resolve()
+  premiumTtsStatus: "idle",
+  premiumTtsLastError: "",
+  premiumAsrStatus: "idle",
+  premiumAsrLastError: "",
+  speechQueue: Promise.resolve(),
+  ttsCache: new Map(),
+  assistantMemory: null,
+  assistantMemoryPersistTimer: null,
+  transcriptionQueue: Promise.resolve(),
+  asrModulePromise: null,
+  asrPipelinePromises: Object.create(null),
+  asrStatus: "idle",
+  asrLastError: ""
 };
-
-loadDotEnv();
 
 function kokoroServerTtsEnabled() {
   if (process.env.KOKORO_SERVER_TTS === "1") {
@@ -272,6 +748,29 @@ function kokoroServerTtsEnabled() {
   }
 
   return true;
+}
+
+function premiumApiKey() {
+  return (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GOOGLE_GENAI_API_KEY ||
+    ""
+  ).trim();
+}
+
+function premiumTtsEnabled() {
+  if (process.env.JARVIS_PREMIUM_TTS === "0") {
+    return false;
+  }
+  return Boolean(premiumApiKey());
+}
+
+function premiumAsrEnabled() {
+  if (process.env.JARVIS_PREMIUM_ASR === "0") {
+    return false;
+  }
+  return Boolean(premiumApiKey());
 }
 
 function loadDotEnv() {
@@ -349,6 +848,234 @@ function sendText(response, statusCode, text) {
   response.end(text);
 }
 
+function setCorsHeaders(response, origin = "*") {
+  response.setHeader("Access-Control-Allow-Origin", origin || "*");
+  response.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+  response.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  response.setHeader("Vary", "Origin");
+}
+
+const LOCAL_EXECUTION_INTENT_TYPES = new Set([
+  "openApp",
+  "openPath",
+  "customCommand",
+  "plannedActions",
+  "settingsPanel",
+  "appearanceMode",
+  "wifiControl",
+  "powerAction",
+  "systemAction",
+  "quitApp",
+  "volumeControl",
+  "spotifyControl",
+  "shortcut",
+  "whatsapp",
+  "whatsappLookup"
+]);
+
+function isLocalExecutionIntent(intent) {
+  return Boolean(intent && LOCAL_EXECUTION_INTENT_TYPES.has(intent.type));
+}
+
+function publicStatus() {
+  const tts = publicTtsConfig();
+  return {
+    mode: APP_MODE,
+    platform: process.platform,
+    assistantName: readConfig().assistantName,
+    localAgent: {
+      enabled: LOCAL_AGENT_ENABLED && !isAgentMode(),
+      baseUrl: LOCAL_AGENT_BASE_URL
+    },
+    tts: {
+      provider: tts.provider,
+      available: tts.available !== false
+    },
+    speechRecognition: publicSpeechRecognitionConfig()
+  };
+}
+
+function createClientAction(type, payload = {}) {
+  return {
+    type,
+    ...payload
+  };
+}
+
+function withClientActions(result, clientActions) {
+  const actions = Array.isArray(clientActions)
+    ? clientActions.filter((action) => action && action.type)
+    : [];
+  if (!actions.length) {
+    return result;
+  }
+  return {
+    ...result,
+    clientActions: actions
+  };
+}
+
+function cloudUnsupportedReply(message, extras = {}) {
+  return createReply(message, extras);
+}
+
+function webUrlForOpenApp(appName, config) {
+  const normalized = normalizeText(appName);
+  const sites = config.sites || {};
+  const directSite = resolveSiteKey(config, normalized);
+  if (directSite && sites[directSite]) {
+    return {
+      url: sites[directSite],
+      label: titleCase(directSite)
+    };
+  }
+
+  if (/\bwhatsapp\b/.test(normalized)) {
+    return {
+      url: sites.whatsappweb || "https://web.whatsapp.com",
+      label: "WhatsApp Web"
+    };
+  }
+
+  if (/\bspotify\b/.test(normalized)) {
+    return {
+      url: sites.spotify || "https://open.spotify.com",
+      label: "Spotify Web"
+    };
+  }
+
+  if (/\b(vscode|vs code|visual studio code)\b/.test(normalized)) {
+    return {
+      url: "https://vscode.dev",
+      label: "VS Code for the Web"
+    };
+  }
+
+  if (/\b(chrome|google chrome|safari|browser)\b/.test(normalized)) {
+    return {
+      url: "",
+      label: "your browser"
+    };
+  }
+
+  return null;
+}
+
+function openUrlClientReply(url, label, replyText = "") {
+  return withClientActions(
+    createReply(replyText || `Opening ${label}.`, {
+      status: "completed"
+    }),
+    [createClientAction("open_url", { url, target: "_blank", fallbackTarget: "_self" })]
+  );
+}
+
+function spotifyWebUrlForAction(action, config) {
+  if (action === "likedSongs") {
+    return "https://open.spotify.com/collection/tracks";
+  }
+  return config.sites?.spotify || "https://open.spotify.com";
+}
+
+function executeCloudIntent(intent, config) {
+  switch (intent.type) {
+    case "openUrl":
+      return openUrlClientReply(intent.url, intent.label);
+    case "openApp": {
+      const fallback = webUrlForOpenApp(intent.appName, config);
+      if (fallback?.url) {
+        return openUrlClientReply(
+          fallback.url,
+          fallback.label,
+          `Opening ${fallback.label} on this device.`
+        );
+      }
+      if (fallback && !fallback.url) {
+        return createReply(`You are already in ${fallback.label}.`, {
+          status: "completed"
+        });
+      }
+      return cloudUnsupportedReply(
+        `I can open web apps from the hosted site, but ${intent.appName} does not have a browser-safe version here.`
+      );
+    }
+    case "openPath":
+      return cloudUnsupportedReply(
+        `I can't open local folders from a hosted browser on every device.`
+      );
+    case "customCommand":
+      return cloudUnsupportedReply(
+        `Custom system commands need a local device app. They can't run from the hosted website alone.`
+      );
+    case "plannedActions":
+      return executePlannedSteps(intent.steps, config);
+    case "settingsPanel":
+      return cloudUnsupportedReply(
+        `System settings panels are not available from the hosted browser version.`
+      );
+    case "appearanceMode":
+      return cloudUnsupportedReply(
+        `Changing the device appearance mode is not available from the hosted browser version.`
+      );
+    case "wifiControl":
+      return cloudUnsupportedReply(
+        `Wi-Fi controls are not available from the hosted browser version.`
+      );
+    case "powerAction":
+      return cloudUnsupportedReply(
+        `Power controls are not available from the hosted browser version.`
+      );
+    case "systemAction":
+      if (intent.action === "screenshot") {
+        return cloudUnsupportedReply(
+          `Use your device screenshot shortcut here. Browsers cannot trigger a real system screenshot on every device.`
+        );
+      }
+      return cloudUnsupportedReply(
+        `That system action is not available from the hosted browser version.`
+      );
+    case "quitApp":
+      return cloudUnsupportedReply(
+        `Closing native apps is not available from the hosted browser version.`
+      );
+    case "volumeControl":
+      return cloudUnsupportedReply(
+        `System volume control is not available from the hosted browser version.`
+      );
+    case "spotifyControl": {
+      const spotifyUrl = spotifyWebUrlForAction(intent.action, config);
+      const reply =
+        intent.action === "likedSongs"
+          ? "Opening Spotify Web with your Liked Songs."
+          : "Opening Spotify Web on this device.";
+      return openUrlClientReply(spotifyUrl, "Spotify Web", reply);
+    }
+    case "shortcut":
+      return cloudUnsupportedReply(
+        `Shortcuts need a local device app. They can't run from the hosted website alone.`
+      );
+    case "whatsapp": {
+      const phone = normalizeWhatsappPhone(intent.contact?.phone || "");
+      if (!phone) {
+        return cloudUnsupportedReply(
+          `I need a real phone number for ${contactLabel(intent.contact)} to open WhatsApp on this device.`
+        );
+      }
+      return openUrlClientReply(
+        whatsappFallbackUrl(phone, intent.message),
+        "WhatsApp",
+        `Opening a WhatsApp draft for ${contactLabel(intent.contact)} on this device.`
+      );
+    }
+    case "whatsappLookup":
+      return cloudUnsupportedReply(
+        `In the hosted version, WhatsApp works with saved config contacts or direct phone numbers.`
+      );
+    default:
+      return null;
+  }
+}
+
 async function serveStatic(response, pathname) {
   const targetPath =
     pathname === "/"
@@ -393,12 +1120,785 @@ function readBody(request) {
   });
 }
 
+function readBinaryBody(request, maxLength = 5_000_000) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let totalLength = 0;
+
+    request.on("data", (chunk) => {
+      const nextChunk = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      totalLength += nextChunk.length;
+      if (totalLength > maxLength) {
+        reject(new Error("Microphone recording is too large."));
+        return;
+      }
+      chunks.push(nextChunk);
+    });
+
+    request.on("end", () => resolve(Buffer.concat(chunks)));
+    request.on("error", reject);
+  });
+}
+
 function normalizeText(text) {
   return String(text || "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+let phonemizerModule = null;
+
+function isAsciiLetterOrDigit(char) {
+  return /[A-Za-z0-9]/.test(char);
+}
+
+function isIgnorablePunctuation(char) {
+  return /[.,!?;:"'(){}\[\]<>]/.test(char) || char === "।" || char === "॥";
+}
+
+function indicConfigForLanguage(language) {
+  const normalized = normalizeConversationLanguage(language) || "english";
+  if (normalized === "hindi") {
+    return DEVANAGARI_PHONEMES;
+  }
+  if (normalized === "telugu") {
+    return TELUGU_PHONEMES;
+  }
+  return null;
+}
+
+function nasalForNextChar(nextChar, config) {
+  if (!nextChar) {
+    return "n";
+  }
+  const groups = config?.nasalGroups;
+  if (!groups) {
+    return "n";
+  }
+  if (groups.velar?.has(nextChar)) {
+    return "ŋ";
+  }
+  if (groups.palatal?.has(nextChar)) {
+    return "ɲ";
+  }
+  if (groups.retroflex?.has(nextChar)) {
+    return "ɳ";
+  }
+  if (groups.labial?.has(nextChar)) {
+    return "m";
+  }
+  return "n";
+}
+
+async function phonemizeEnglishSegment(text) {
+  const cleaned = String(text || "").trim();
+  if (!cleaned) {
+    return "";
+  }
+  try {
+    if (!phonemizerModule) {
+      phonemizerModule = require("phonemizer");
+    }
+    const parts = await phonemizerModule.phonemize(cleaned, "en-us");
+    return parts.join(" ").replace(/\s+/g, " ").trim();
+  } catch (error) {
+    return "";
+  }
+}
+
+async function phonemizeIndic(text, language) {
+  const config = indicConfigForLanguage(language);
+  if (!config) {
+    return "";
+  }
+
+  const chars = Array.from(String(text || ""));
+  const tokens = [];
+  let latinBuffer = "";
+
+  const flushLatin = async () => {
+    if (!latinBuffer) {
+      return;
+    }
+    const phonemes = await phonemizeEnglishSegment(latinBuffer);
+    if (phonemes) {
+      tokens.push(...phonemes.split(/\s+/g));
+    }
+    latinBuffer = "";
+  };
+
+  for (let index = 0; index < chars.length; index += 1) {
+    const ch = chars[index];
+    const digit = config.digits?.[ch];
+    if (digit) {
+      latinBuffer += digit;
+      continue;
+    }
+    if (isAsciiLetterOrDigit(ch)) {
+      latinBuffer += ch;
+      continue;
+    }
+
+    if (latinBuffer) {
+      await flushLatin();
+    }
+
+    if (!ch || /\s/.test(ch) || isIgnorablePunctuation(ch)) {
+      continue;
+    }
+
+    if (config.vowels[ch]) {
+      tokens.push(config.vowels[ch]);
+      continue;
+    }
+
+    if (config.anusvara?.has(ch)) {
+      tokens.push(nasalForNextChar(chars[index + 1], config));
+      continue;
+    }
+
+    if (config.visarga && ch === config.visarga) {
+      tokens.push("h");
+      continue;
+    }
+
+    const consonant = config.consonants[ch];
+    if (!consonant) {
+      continue;
+    }
+
+    let resolvedConsonant = consonant;
+    let nextChar = chars[index + 1];
+    if (config.nukta && nextChar === config.nukta) {
+      resolvedConsonant = config.nuktaConsonants?.[ch] || consonant;
+      index += 1;
+      nextChar = chars[index + 1];
+    }
+
+    if (config.virama && nextChar === config.virama) {
+      tokens.push(resolvedConsonant);
+      index += 1;
+      continue;
+    }
+
+    if (config.matras?.[nextChar]) {
+      tokens.push(resolvedConsonant);
+      tokens.push(config.matras[nextChar]);
+      index += 1;
+      continue;
+    }
+
+    tokens.push(resolvedConsonant);
+    if (config.inherentVowel) {
+      tokens.push(config.inherentVowel);
+    }
+  }
+
+  if (latinBuffer) {
+    await flushLatin();
+  }
+
+  return tokens.join(" ").replace(/\s+/g, " ").trim();
+}
+
+function detectScriptLanguage(text) {
+  const raw = String(text || "");
+  if (TELUGU_SCRIPT_REGEX.test(raw)) {
+    return "telugu";
+  }
+  if (DEVANAGARI_SCRIPT_REGEX.test(raw)) {
+    return "hindi";
+  }
+  return /[a-z]/i.test(raw) ? "english" : null;
+}
+
+function normalizeConversationLanguage(value) {
+  const raw = String(value || "").trim();
+  const normalized = normalizeText(raw);
+
+  if (
+    normalized === "auto" ||
+    normalized === "default" ||
+    normalized === "automatic" ||
+    normalized === "auto language" ||
+    normalized === "default language"
+  ) {
+    return "auto";
+  }
+
+  if (
+    normalized === "english" ||
+    normalized === "en" ||
+    /\benglish\b/.test(normalized)
+  ) {
+    return "english";
+  }
+
+  if (
+    normalized === "hindi" ||
+    normalized === "hi" ||
+    /हिंदी|हिन्दी/u.test(raw) ||
+    /\bhindi\b/.test(normalized)
+  ) {
+    return "hindi";
+  }
+
+  if (
+    normalized === "telugu" ||
+    normalized === "te" ||
+    /తెలుగు/u.test(raw) ||
+    /\btelugu\b/.test(normalized)
+  ) {
+    return "telugu";
+  }
+
+  return null;
+}
+
+function conversationLanguageCode(language) {
+  return CONVERSATION_LANGUAGE_CODES[normalizeConversationLanguage(language) || "auto"];
+}
+
+function conversationLanguageLabel(language) {
+  switch (normalizeConversationLanguage(language)) {
+    case "english":
+      return "English";
+    case "hindi":
+      return "Hindi";
+    case "telugu":
+      return "Telugu";
+    default:
+      return "Auto";
+  }
+}
+
+function preferredConversationLanguage() {
+  return normalizeConversationLanguage(state.sessionContext?.preferredLanguage) || "auto";
+}
+
+function effectiveConversationLanguage(text, overrideLanguage) {
+  const preferred = normalizeConversationLanguage(overrideLanguage) || preferredConversationLanguage();
+  if (preferred && preferred !== "auto") {
+    return preferred;
+  }
+  return detectScriptLanguage(text) || "english";
+}
+
+function localizedResponse(key, params = {}, language = preferredConversationLanguage()) {
+  const entry = LOCALIZED_RESPONSE_TEMPLATES[key];
+  if (!entry) {
+    return "";
+  }
+
+  const resolvedLanguage = effectiveConversationLanguage("", language);
+  const template = entry[resolvedLanguage] || entry.english;
+  return typeof template === "function" ? template(params) : template;
+}
+
+function readyWhatsappPrompt(contact, message, delivery, language) {
+  return localizedResponse(
+    "readyWhatsapp",
+    {
+      contact: contactLabel(contact),
+      suffix: contactPhoneSuffix(contact?.phone),
+      delivery,
+      message
+    },
+    language
+  );
+}
+
+function readyScheduledWhatsappPrompt(contact, message, sendAt, language) {
+  return localizedResponse(
+    "readyScheduledWhatsapp",
+    {
+      contact: contactLabel(contact),
+      suffix: contactPhoneSuffix(contact?.phone),
+      message,
+      when: formatScheduledDateTime(sendAt, language)
+    },
+    language
+  );
+}
+
+function localeForLanguage(language) {
+  const normalized = normalizeConversationLanguage(language) || "english";
+  if (normalized === "hindi") {
+    return "hi-IN";
+  }
+  if (normalized === "telugu") {
+    return "te-IN";
+  }
+  return "en-IN";
+}
+
+function formatScheduledDateTime(value, language = preferredConversationLanguage()) {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(localeForLanguage(language), {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(date);
+}
+
+function parseClockTime(hourText, minuteText, meridiem) {
+  let hour = Number(hourText);
+  const minute = Number(minuteText || 0);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute < 0 || minute > 59) {
+    return null;
+  }
+
+  const normalizedMeridiem = String(meridiem || "").trim().toLowerCase();
+  if (normalizedMeridiem === "am") {
+    if (hour === 12) {
+      hour = 0;
+    }
+  } else if (normalizedMeridiem === "pm") {
+    if (hour < 12) {
+      hour += 12;
+    }
+  }
+
+  if (hour < 0 || hour > 23) {
+    return null;
+  }
+
+  return {
+    hour,
+    minute
+  };
+}
+
+function parseScheduledDateTimeExpression(expression) {
+  const raw = String(expression || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const now = new Date();
+  const relativePatterns = [
+    { pattern: /^in\s+(\d+)\s*(minutes?|mins?)$/i, unit: "minutes" },
+    { pattern: /^in\s+(\d+)\s*(hours?|hrs?)$/i, unit: "hours" },
+    { pattern: /^(\d+)\s*(मिनट)\s+(?:में|बाद)$/u, unit: "minutes" },
+    { pattern: /^(\d+)\s*(घंटा|घंटे)\s+(?:में|बाद)$/u, unit: "hours" },
+    { pattern: /^(\d+)\s*(నిమిషం|నిమిషాలు)\s*(?:లో|తర్వాత)$/u, unit: "minutes" },
+    { pattern: /^(\d+)\s*(గంట|గంటలు)\s*(?:లో|తర్వాత)$/u, unit: "hours" }
+  ];
+
+  for (const { pattern, unit } of relativePatterns) {
+    const match = raw.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const value = Number(match[1]);
+    if (!Number.isFinite(value) || value <= 0) {
+      return null;
+    }
+
+    const date = new Date(now);
+    if (unit === "hours") {
+      date.setHours(date.getHours() + value);
+    } else {
+      date.setMinutes(date.getMinutes() + value);
+    }
+    return date;
+  }
+
+  const absolutePatterns = [
+    { pattern: /^today\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i, dayOffset: 0 },
+    { pattern: /^tomorrow\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i, dayOffset: 1 },
+    { pattern: /^कल\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm|बजे)?$/u, dayOffset: 1 },
+    { pattern: /^రేపు\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/u, dayOffset: 1 }
+  ];
+
+  for (const { pattern, dayOffset } of absolutePatterns) {
+    const match = raw.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const time = parseClockTime(match[1], match[2], match[3]);
+    if (!time) {
+      return null;
+    }
+
+    const date = new Date(now);
+    date.setDate(date.getDate() + dayOffset);
+    date.setHours(time.hour, time.minute, 0, 0);
+    if (date.getTime() <= now.getTime()) {
+      date.setDate(date.getDate() + 1);
+    }
+    return date;
+  }
+
+  let match = raw.match(/^at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (match) {
+    const time = parseClockTime(match[1], match[2], match[3]);
+    if (!time) {
+      return null;
+    }
+    const date = new Date(now);
+    date.setHours(time.hour, time.minute, 0, 0);
+    if (date.getTime() <= now.getTime()) {
+      date.setDate(date.getDate() + 1);
+    }
+    return date;
+  }
+
+  match = raw.match(/^at\s+(\d{1,2}):(\d{2})$/i);
+  if (match) {
+    const time = parseClockTime(match[1], match[2], "");
+    if (!time) {
+      return null;
+    }
+    const date = new Date(now);
+    date.setHours(time.hour, time.minute, 0, 0);
+    if (date.getTime() <= now.getTime()) {
+      date.setDate(date.getDate() + 1);
+    }
+    return date;
+  }
+
+  match = raw.match(/^on\s+(\d{4})-(\d{2})-(\d{2})\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if (match) {
+    const time = parseClockTime(match[4], match[5], match[6]);
+    if (!time) {
+      return null;
+    }
+    const date = new Date(
+      Number(match[1]),
+      Number(match[2]) - 1,
+      Number(match[3]),
+      time.hour,
+      time.minute,
+      0,
+      0
+    );
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+
+  return null;
+}
+
+function extractScheduledCommand(rawText) {
+  const text = String(rawText || "").trim();
+  if (!text) {
+    return null;
+  }
+
+  const suffixPatterns = [
+    /\s+(in\s+\d+\s*(?:minutes?|mins?|hours?|hrs?))$/i,
+    /\s+(today\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/i,
+    /\s+(tomorrow\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/i,
+    /\s+(at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm))$/i,
+    /\s+(at\s+\d{1,2}:\d{2})$/i,
+    /\s+(on\s+\d{4}-\d{2}-\d{2}\s+at\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/i,
+    /\s+((?:\d+)\s*(?:मिनट|घंटा|घंटे)\s+(?:में|बाद))$/u,
+    /\s+((?:\d+)\s*(?:నిమిషం|నిమిషాలు|గంట|గంటలు)\s*(?:లో|తర్వాత))$/u,
+    /\s+((?:कल)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm|बजे)?)$/u,
+    /\s+((?:రేపు)\s+\d{1,2}(?::\d{2})?\s*(?:am|pm)?)$/u
+  ];
+
+  for (const pattern of suffixPatterns) {
+    const match = text.match(pattern);
+    if (!match || typeof match.index !== "number") {
+      continue;
+    }
+
+    const scheduledAt = parseScheduledDateTimeExpression(match[1]);
+    if (!scheduledAt) {
+      continue;
+    }
+
+    return {
+      sendAt: scheduledAt,
+      commandText: text.slice(0, match.index).trim(),
+      timeText: match[1].trim()
+    };
+  }
+
+  return null;
+}
+
+function createScheduledMessageId() {
+  return `scheduled_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeScheduledMessageRecord(entry) {
+  if (!entry || typeof entry !== "object") {
+    return null;
+  }
+
+  const sendAt = new Date(entry.sendAt);
+  if (Number.isNaN(sendAt.getTime())) {
+    return null;
+  }
+
+  return {
+    id: String(entry.id || createScheduledMessageId()),
+    contact: cloneContactForContext(entry.contact),
+    message: String(entry.message || "").trim(),
+    sendAt: sendAt.toISOString(),
+    status: String(entry.status || "pending"),
+    createdAt: String(entry.createdAt || new Date().toISOString()),
+    sentAt: entry.sentAt ? String(entry.sentAt) : "",
+    error: entry.error ? String(entry.error) : "",
+    conversationLanguage: normalizeConversationLanguage(entry.conversationLanguage) || "auto"
+  };
+}
+
+async function loadScheduledMessages() {
+  try {
+    const text = await fsp.readFile(SCHEDULED_MESSAGES_PATH, "utf8");
+    const parsed = JSON.parse(text);
+    state.scheduledMessages = Array.isArray(parsed)
+      ? parsed.map(normalizeScheduledMessageRecord).filter(Boolean)
+      : [];
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Jarvis could not read scheduled messages: ${error.message}`);
+    }
+    state.scheduledMessages = [];
+  }
+}
+
+async function persistScheduledMessages() {
+  await fsp.mkdir(path.dirname(SCHEDULED_MESSAGES_PATH), { recursive: true });
+  await fsp.writeFile(
+    SCHEDULED_MESSAGES_PATH,
+    JSON.stringify(state.scheduledMessages, null, 2) + "\n",
+    "utf8"
+  );
+}
+
+async function saveScheduledWhatsapp(contact, message, sendAt, conversationLanguage) {
+  const record = normalizeScheduledMessageRecord({
+    id: createScheduledMessageId(),
+    contact,
+    message,
+    sendAt: sendAt instanceof Date ? sendAt.toISOString() : sendAt,
+    status: "pending",
+    createdAt: new Date().toISOString(),
+    conversationLanguage
+  });
+
+  state.scheduledMessages.push(record);
+  state.scheduledMessages.sort((left, right) => new Date(left.sendAt) - new Date(right.sendAt));
+  await persistScheduledMessages();
+  return record;
+}
+
+function pendingScheduledMessages(limit = 10) {
+  return state.scheduledMessages
+    .filter((entry) => entry.status === "pending")
+    .sort((left, right) => new Date(left.sendAt) - new Date(right.sendAt))
+    .slice(0, limit);
+}
+
+function scheduledMessagesSummary(language = preferredConversationLanguage()) {
+  const pending = pendingScheduledMessages(5);
+  if (!pending.length) {
+    return localizedResponse("scheduledMessagesEmpty", {}, language);
+  }
+
+  const items = pending
+    .map((entry, index) => {
+      const when = formatScheduledDateTime(entry.sendAt, language);
+      return `${index + 1}. ${contactLabel(entry.contact)} at ${when}: "${entry.message}"`;
+    })
+    .join(" ");
+  return `Here are your pending scheduled messages. ${items}`;
+}
+
+function describeScheduledMessage(entry, index, language = preferredConversationLanguage()) {
+  const when = formatScheduledDateTime(entry.sendAt, language);
+  return `${index + 1}. ${contactLabel(entry.contact)} at ${when}: "${entry.message}"`;
+}
+
+function resolveScheduledMessageSelection(selectorText) {
+  const pending = pendingScheduledMessages(50);
+  if (!pending.length) {
+    return null;
+  }
+
+  const raw = String(selectorText || "").trim();
+  if (!raw) {
+    return pending.length === 1 ? pending[0] : null;
+  }
+
+  const listIndex = parseListSelection(raw, pending.length);
+  if (listIndex !== null) {
+    return pending[listIndex] || null;
+  }
+
+  const normalized = normalizeText(raw);
+  if (!normalized) {
+    return pending.length === 1 ? pending[0] : null;
+  }
+
+  if (["latest", "last", "newest"].includes(normalized)) {
+    return pending[pending.length - 1] || null;
+  }
+
+  if (["next", "first", "upcoming"].includes(normalized)) {
+    return pending[0] || null;
+  }
+
+  const bySuffix = pending.filter((entry) => {
+    const suffix = contactPhoneSuffix(entry.contact?.phone || "");
+    return suffix && normalized.includes(suffix);
+  });
+  if (bySuffix.length === 1) {
+    return bySuffix[0];
+  }
+
+  const byContact = pending.filter((entry) => {
+    const aliases = [
+      entry.contact?.displayName || "",
+      entry.contact?.key || "",
+      ...(Array.isArray(entry.contact?.aliases) ? entry.contact.aliases : [])
+    ]
+      .map(normalizeText)
+      .filter(Boolean);
+    return aliases.some(
+      (alias) =>
+        alias === normalized || alias.includes(normalized) || normalized.includes(alias)
+    );
+  });
+  if (byContact.length === 1) {
+    return byContact[0];
+  }
+
+  const byMessage = pending.filter((entry) =>
+    normalizeText(entry.message || "").includes(normalized)
+  );
+  if (byMessage.length === 1) {
+    return byMessage[0];
+  }
+
+  return pending.length === 1 ? pending[0] : null;
+}
+
+async function cancelScheduledMessage(record) {
+  const target = state.scheduledMessages.find((entry) => entry.id === record?.id);
+  if (!target) {
+    return null;
+  }
+
+  target.status = "cancelled";
+  target.error = "";
+  target.cancelledAt = new Date().toISOString();
+  await persistScheduledMessages();
+  return target;
+}
+
+async function updateScheduledMessage(record, updates = {}) {
+  const target = state.scheduledMessages.find((entry) => entry.id === record?.id);
+  if (!target) {
+    return null;
+  }
+
+  if (updates.sendAt) {
+    target.sendAt = updates.sendAt instanceof Date ? updates.sendAt.toISOString() : String(updates.sendAt);
+  }
+  if (typeof updates.message === "string" && updates.message.trim()) {
+    target.message = cleanWhatsappMessage(updates.message);
+  }
+  if (updates.contact) {
+    target.contact = cloneContactForContext(updates.contact);
+  }
+  target.status = "pending";
+  target.error = "";
+  state.scheduledMessages.sort((left, right) => new Date(left.sendAt) - new Date(right.sendAt));
+  await persistScheduledMessages();
+  return target;
+}
+
+async function processDueScheduledMessages() {
+  if (!state.scheduledMessages.length) {
+    return;
+  }
+
+  const dueEntries = state.scheduledMessages.filter((entry) => {
+    if (entry.status !== "pending") {
+      return false;
+    }
+    if (state.scheduledMessageInFlight.has(entry.id)) {
+      return false;
+    }
+    return new Date(entry.sendAt).getTime() <= Date.now();
+  });
+
+  for (const entry of dueEntries) {
+    state.scheduledMessageInFlight.add(entry.id);
+    try {
+      const result = await executeIntent(
+        {
+          type: "whatsapp",
+          contact: entry.contact,
+          message: entry.message
+        },
+        readConfig()
+      );
+      if (result?.status === "failed") {
+        entry.status = "failed";
+        entry.error = String(result.reply || "Delivery failed.");
+      } else {
+        entry.status = "sent";
+        entry.sentAt = new Date().toISOString();
+        entry.error = "";
+      }
+    } catch (error) {
+      entry.status = "failed";
+      entry.error = String(error?.message || error || "Delivery failed.");
+    } finally {
+      state.scheduledMessageInFlight.delete(entry.id);
+      await persistScheduledMessages().catch(() => {});
+    }
+  }
+}
+
+async function startScheduledMessageRunner() {
+  await loadScheduledMessages();
+  if (state.scheduledMessageTimer) {
+    return;
+  }
+
+  await processDueScheduledMessages().catch(() => {});
+  state.scheduledMessageTimer = setInterval(() => {
+    processDueScheduledMessages().catch(() => {});
+  }, SCHEDULED_MESSAGE_POLL_MS);
+}
+
+function stopScheduledMessageRunner() {
+  if (!state.scheduledMessageTimer) {
+    return;
+  }
+  clearInterval(state.scheduledMessageTimer);
+  state.scheduledMessageTimer = null;
+}
+
+function applyTurnConversationLanguage(result, rawText) {
+  if (!result || typeof result !== "object") {
+    return result;
+  }
+
+  if (
+    !result.conversationLanguage ||
+    result.conversationLanguage === "auto"
+  ) {
+    result.conversationLanguage =
+      detectScriptLanguage(result.reply || "") ||
+      effectiveConversationLanguage(rawText);
+  }
+
+  return result;
 }
 
 function stripWakeWords(text, assistantName) {
@@ -407,7 +1907,13 @@ function stripWakeWords(text, assistantName) {
   const patterns = [
     new RegExp(`^hey\\s+${normalizedName}[,\\s:.-]*`, "i"),
     new RegExp(`^hi\\s+${normalizedName}[,\\s:.-]*`, "i"),
+    new RegExp(`^hello\\s+${normalizedName}[,\\s:.-]*`, "i"),
+    new RegExp(`^namaste\\s+${normalizedName}[,\\s:.-]*`, "i"),
     new RegExp(`^${normalizedName}[,\\s:.-]*`, "i"),
+    /^(?:हे|हाय|హेलो|नमस्ते)\s+जार्विस[\s,:.-]*/u,
+    /^जार्विस[\s,:.-]*/u,
+    /^(?:హే|హాయ్|నమస్తే)\s+జార్విస్[\s,:.-]*/u,
+    /^జార్విస్[\s,:.-]*/u,
     /^please\s+/i,
     /^can you\s+/i,
     /^could you\s+/i
@@ -418,16 +1924,300 @@ function stripWakeWords(text, assistantName) {
   return cleaned || text;
 }
 
+function parseAssistantAddress(text, assistantName) {
+  const normalizedName = normalizeText(assistantName || "jarvis");
+  const raw = String(text || "").trim();
+  const patterns = [
+    new RegExp(`^(?:hey|hi|hello|namaste)\\s+${normalizedName}\\b[\\s,:.!-]*(.*)$`, "i"),
+    new RegExp(`^${normalizedName}\\b[\\s,:.!-]*(.*)$`, "i"),
+    /^(?:हे|हाय|हेलो|नमस्ते)\s+जार्विस\b[\s,:.!-]*(.*)$/u,
+    /^जार्विस\b[\s,:.!-]*(.*)$/u,
+    /^(?:హే|హాయ్|నమస్తే)\s+జార్విస్\b[\s,:.!-]*(.*)$/u,
+    /^జార్విస్\b[\s,:.!-]*(.*)$/u
+  ];
+
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (match) {
+      return {
+        addressed: true,
+        command: String(match[1] || "").trim()
+      };
+    }
+  }
+
+  return {
+    addressed: false,
+    command: raw
+  };
+}
+
 function isAffirmative(text) {
-  return /^(yes|yeah|yep|confirm|do it|send it|go ahead|proceed|sure)$/.test(
-    normalizeText(text)
-  );
+  return [
+    "yes",
+    "yeah",
+    "yep",
+    "confirm",
+    "do it",
+    "send it",
+    "go ahead",
+    "proceed",
+    "sure",
+    "haan",
+    "han",
+    "haan ji",
+    "haan ji",
+    "जी हाँ",
+    "हाँ",
+    "हां",
+    "हाँ जी",
+    "अवును",
+    "ఔను",
+    "సరే"
+  ].includes(normalizeText(text));
 }
 
 function isNegative(text) {
-  return /^(no|nope|cancel|stop|never mind|dont|don't)$/.test(
-    normalizeText(text)
+  return [
+    "no",
+    "nope",
+    "cancel",
+    "stop",
+    "never mind",
+    "dont",
+    "don't",
+    "नहीं",
+    "नहि",
+    "मत",
+    "रुको",
+    "कాదు",
+    "వద్దు",
+    "ఆపు"
+  ].includes(normalizeText(text));
+}
+
+const LIST_SELECTION_WORDS = {
+  first: 1,
+  one: 1,
+  second: 2,
+  two: 2,
+  third: 3,
+  three: 3,
+  fourth: 4,
+  four: 4,
+  fifth: 5,
+  five: 5,
+  पहला: 1,
+  पहली: 1,
+  एक: 1,
+  दूसरा: 2,
+  दूसरी: 2,
+  दो: 2,
+  तीसरा: 3,
+  तीसरी: 3,
+  तीन: 3,
+  चौथा: 4,
+  चौथी: 4,
+  चार: 4,
+  पाँचवाँ: 5,
+  पाँचवीं: 5,
+  पांचवा: 5,
+  पाँच: 5,
+  మొదటి: 1,
+  ఒకటి: 1,
+  రెండో: 2,
+  రెండవ: 2,
+  రెండు: 2,
+  మూడో: 3,
+  మూడవ: 3,
+  మూడు: 3,
+  నాల్గో: 4,
+  నాల్గవ: 4,
+  నాలుగు: 4,
+  ఐదో: 5,
+  ఐదవ: 5,
+  ఐదు: 5
+};
+
+function parseListSelection(text, max) {
+  const normalized = normalizeText(text);
+  if (!normalized) {
+    return null;
+  }
+
+  const numericMatch = normalized.match(
+    /^(?:option|choice|pick|select|choose|number|विकल्प|ఎంపిక)?\s*(\d+)$/u
   );
+  if (numericMatch) {
+    const index = Number(numericMatch[1]);
+    if (index >= 1 && index <= max) {
+      return index - 1;
+    }
+  }
+
+  const ordinalMatch = normalized.match(
+    /^(?:(?:pick|select|choose|विकल्प चुनो|ఎంపిక ఎంచుకో)\s+)?(?:the\s+)?(first|one|second|two|third|three|fourth|four|fifth|five|पहला|पहली|एक|दूसरा|दूसरी|दो|तीसरा|तीसरी|तीन|चौथा|चौथी|चार|पाँचवाँ|पाँचवीं|पांचवा|पाँच|మొదటి|ఒకటి|రెండో|రెండవ|రెండు|మూడో|మూడవ|మూడు|నాల్గో|నాల్గవ|నాలుగు|ఐదో|ఐదవ|ఐదు)(?:\s+one)?$/u
+  );
+  if (ordinalMatch) {
+    const index = LIST_SELECTION_WORDS[ordinalMatch[1]];
+    return index >= 1 && index <= max ? index - 1 : null;
+  }
+
+  const embeddedNumber = normalized.match(/\b(\d+)\b/u);
+  if (embeddedNumber) {
+    const index = Number(embeddedNumber[1]);
+    if (index >= 1 && index <= max) {
+      return index - 1;
+    }
+  }
+
+  const embeddedOrdinal = normalized.match(
+    /\b(first|one|second|two|third|three|fourth|four|fifth|five|पहला|पहली|एक|दूसरा|दूसरी|दो|तीसरा|तीसरी|तीन|चौथा|चौथी|चार|पाँचवाँ|पाँचवीं|पांचवा|पाँच|మొదటి|ఒకటి|రెండో|రెండవ|రెండు|మూడో|మూడవ|మూడు|నాల్గో|నాల్గవ|నాలుగు|ఐదో|ఐదవ|ఐదు)\b/u
+  );
+  if (embeddedOrdinal) {
+    const index = LIST_SELECTION_WORDS[embeddedOrdinal[1]];
+    return index >= 1 && index <= max ? index - 1 : null;
+  }
+
+  return null;
+}
+
+function contactPhoneSuffix(phone) {
+  const digits = String(phone || "").replace(/[^\d]/g, "");
+  return digits.length >= 4 ? digits.slice(-4) : "";
+}
+
+function collapseRepeatedName(text) {
+  const words = String(text || "").split(" ").filter(Boolean);
+  if (words.length >= 2 && words.length % 2 === 0) {
+    const half = words.length / 2;
+    const left = words.slice(0, half).join(" ");
+    const right = words.slice(half).join(" ");
+    if (left === right) {
+      return left;
+    }
+  }
+  return words.join(" ");
+}
+
+function describeContactChoice(contact, index, language = preferredConversationLanguage()) {
+  const label = contactLabel(contact);
+  const suffix = contactPhoneSuffix(contact.phone);
+  return localizedResponse(
+    "contactChoiceItem",
+    {
+      index,
+      label,
+      suffix
+    },
+    language
+  );
+}
+
+function whatsappChoicePrompt(spokenName, matches) {
+  const language = effectiveConversationLanguage(spokenName);
+  const items = matches
+    .map((contact, index) => describeContactChoice(contact, index, language))
+    .join(" ");
+  return localizedResponse("contactChoicePrompt", {
+    spokenName,
+    items
+  }, language);
+}
+
+function matchContactBySuffix(rawText, matches) {
+  const digitMatches = String(rawText || "").match(/\d{4,}/g);
+  if (!digitMatches || !digitMatches.length) {
+    return null;
+  }
+  const suffixes = digitMatches.map((digits) => digits.slice(-4));
+  const candidates = matches.filter((contact) => {
+    const suffix = contactPhoneSuffix(contact.phone);
+    return suffix && suffixes.includes(suffix);
+  });
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
+function matchLastContactChoice(matches) {
+  const lastContact = state.sessionContext?.lastContact || recentContactMemory();
+  if (!lastContact) {
+    return null;
+  }
+  const lastPhone = normalizeWhatsappPhone(lastContact.phone || "");
+  const lastKey = normalizeText(lastContact.key || lastContact.displayName || "");
+  return (
+    matches.find((contact) => {
+      const contactPhone = normalizeWhatsappPhone(contact.phone || "");
+      if (lastPhone && contactPhone && lastPhone === contactPhone) {
+        return true;
+      }
+      const contactKey = normalizeText(contact.key || contact.displayName || "");
+      return lastKey && contactKey && lastKey === contactKey;
+    }) || null
+  );
+}
+
+function looksLikePronounSelection(rawText) {
+  const normalized = normalizeText(rawText);
+  if (!normalized) {
+    return false;
+  }
+  if (/\b(him|her|them)\b/.test(normalized)) {
+    return true;
+  }
+  if (/\b(this|that)\b/.test(normalized) && /\b(one|contact|person|guy|girl|gal)\b/.test(normalized)) {
+    return true;
+  }
+  return false;
+}
+
+function resolveContactChoiceFromReply(rawText, matches) {
+  const numericIndex = parseListSelection(rawText, matches.length);
+  if (numericIndex !== null) {
+    return matches[numericIndex];
+  }
+
+  const suffixMatch = matchContactBySuffix(rawText, matches);
+  if (suffixMatch) {
+    return suffixMatch;
+  }
+
+  const normalized = normalizeText(rawText);
+  if (!normalized) {
+    return null;
+  }
+
+  const namedMatch =
+    matches.find((contact) => {
+      const aliases = [
+        contact.displayName || "",
+        contact.key || "",
+        ...(Array.isArray(contact.aliases) ? contact.aliases : [])
+      ]
+        .map(normalizeText)
+        .filter(Boolean);
+
+      return aliases.some(
+        (alias) =>
+          alias === normalized ||
+          alias.includes(normalized) ||
+          normalized.includes(alias)
+      );
+    }) || null;
+
+  if (namedMatch) {
+    return namedMatch;
+  }
+
+  if (looksLikePronounSelection(rawText)) {
+    const lastContactMatch = matchLastContactChoice(matches);
+    if (lastContactMatch) {
+      return lastContactMatch;
+    }
+    return matches[0] || null;
+  }
+
+  return null;
 }
 
 function titleCase(text) {
@@ -443,16 +2233,38 @@ function publicConfig(config) {
   const profile = readUserProfile();
   return {
     assistantName: config.assistantName,
+    deployment: {
+      mode: APP_MODE,
+      hosted: isCloudMode()
+    },
+    localAgent: {
+      enabled: LOCAL_AGENT_ENABLED && !isAgentMode(),
+      baseUrl: LOCAL_AGENT_BASE_URL
+    },
+    conversationLanguage: preferredConversationLanguage(),
+    recognitionLanguage: conversationLanguageCode(preferredConversationLanguage()),
     user: {
       displayName: currentUserDisplayName(profile)
     },
     tts: publicTtsConfig(),
+    speechRecognition: publicSpeechRecognitionConfig(),
     messageDelivery: config.messageDelivery,
     knowledge: {
       enabled: Boolean(config.knowledge?.enabled),
       provider,
       model: activeKnowledgeModel(config),
       status: knowledgeStatus(config)
+    },
+    memory: {
+      recentCommands: (state.assistantMemory?.recentCommands || [])
+        .slice(0, 4)
+        .map((entry) => entry.text),
+      recentApps: (state.assistantMemory?.recentApps || [])
+        .slice(0, 4)
+        .map((entry) => entry.name),
+      recentContacts: (state.assistantMemory?.recentContacts || [])
+        .slice(0, 4)
+        .map((entry) => entry.displayName || titleCase(entry.key || ""))
     },
     contacts: Object.entries(config.contacts || {}).map(([key, contact]) => ({
       key,
@@ -466,6 +2278,12 @@ function publicConfig(config) {
     examples: [
       `open WhatsApp`,
       `message dad saying I will be late by ten minutes`,
+      `schedule a WhatsApp to dad saying I will be late tomorrow at 6 pm`,
+      `show scheduled messages`,
+      `cancel scheduled message 1`,
+      `reschedule scheduled message 1 to tomorrow at 7 pm`,
+      `talk to me in Hindi`,
+      `తెలుగులో మాట్లాడు`,
       `open Spotify and play my liked songs`,
       `next song`,
       `set volume to 40`,
@@ -479,6 +2297,8 @@ function publicConfig(config) {
 function createReply(message, extras = {}) {
   return {
     reply: message,
+    conversationLanguage:
+      extras.conversationLanguage || preferredConversationLanguage(),
     ...extras
   };
 }
@@ -495,9 +2315,18 @@ function rememberPending(action, prompt) {
       lastWhatsappMessage: action.message || state.sessionContext.lastWhatsappMessage
     });
   }
+
+  const awaitingSelection = action?.type === "whatsappContactChoice";
+  const language =
+    action?.conversationLanguage ||
+    effectiveConversationLanguage(
+      [prompt, action?.message, action?.spokenName, contactLabel(action?.contact)].filter(Boolean).join(" ")
+    );
   return createReply(prompt, {
-    awaitingConfirmation: true,
-    status: "needs_confirmation"
+    awaitingConfirmation: !awaitingSelection,
+    awaitingSelection,
+    conversationLanguage: language,
+    status: awaitingSelection ? "needs_selection" : "needs_confirmation"
   });
 }
 
@@ -567,43 +2396,184 @@ function currentUserDisplayName(profile = readUserProfile()) {
 }
 
 function nativeTtsConfig() {
-  if (process.platform !== "darwin") {
-    return {
-      provider: "browser",
-      femaleVoice: "",
-      maleVoice: ""
-    };
-  }
-
   return {
-    provider: "native_mac",
-    femaleVoice: NATIVE_TTS_VOICES.female[0],
-    maleVoice: NATIVE_TTS_VOICES.male[0]
+    provider: "browser",
+    femaleVoice: "",
+    maleVoice: ""
   };
 }
 
+function nativeVoiceNameForLanguage(language, voiceMode) {
+  if (process.platform !== "darwin") {
+    return "";
+  }
+
+  const mode = voiceMode === "male" ? "male" : "female";
+  const normalizedLanguage = normalizeConversationLanguage(language) || "english";
+  if (normalizedLanguage === "hindi" || normalizedLanguage === "telugu") {
+    return NATIVE_MULTILINGUAL_TTS_VOICES[normalizedLanguage]?.[mode]?.[0] || "";
+  }
+
+  return NATIVE_TTS_VOICES[mode]?.[0] || "";
+}
+
+function ttsProviderCandidatesForLanguage(language) {
+  const normalizedLanguage = normalizeConversationLanguage(language) || "english";
+  const providers = [];
+
+  if (normalizedLanguage === "hindi" || normalizedLanguage === "telugu") {
+    if (kokoroServerTtsEnabled()) {
+      providers.push("kokoro_server");
+    }
+    if (!providers.length && premiumTtsEnabled()) {
+      providers.push("gemini_tts");
+    }
+    return providers;
+  }
+
+  if (kokoroServerTtsEnabled()) {
+    providers.push("kokoro_server");
+  }
+  if (premiumTtsEnabled()) {
+    providers.push("gemini_tts");
+  }
+  return providers;
+}
+
+function ttsProviderForLanguage(language) {
+  return ttsProviderCandidatesForLanguage(language)[0] || "browser";
+}
+
 function publicTtsConfig() {
-  if (!kokoroServerTtsEnabled()) {
+  const englishProvider = ttsProviderForLanguage("english");
+  const hindiProvider = ttsProviderForLanguage("hindi");
+  const teluguProvider = ttsProviderForLanguage("telugu");
+
+  if (
+    englishProvider === "browser" &&
+    hindiProvider === "browser" &&
+    teluguProvider === "browser"
+  ) {
     return {
       provider: "browser",
       femaleVoice: "",
       maleVoice: "",
       available: false,
       status: "disabled",
-      error: "Server-side Kokoro TTS is disabled on this host.",
-      fallbackProvider: "browser"
+      error: "Server-side speech is disabled on this host.",
+      fallbackProvider: "browser",
+      languageProviders: {
+        english: "browser",
+        hindi: "browser",
+        telugu: "browser"
+      },
+      nativeVoices: {
+        hindi: "",
+        telugu: ""
+      }
     };
   }
 
-  const available = state.kokoroStatus === "ready";
   return {
-    provider: "kokoro_server",
-    femaleVoice: KOKORO_TTS_VOICES.female.label,
-    maleVoice: KOKORO_TTS_VOICES.male.label,
-    available,
-    status: state.kokoroStatus,
-    error: available ? "" : state.kokoroLastError,
-    fallbackProvider: "browser"
+    provider: englishProvider,
+    femaleVoice:
+      englishProvider === "kokoro_server"
+        ? KOKORO_TTS_VOICES.female.label
+        : englishProvider === "gemini_tts"
+          ? PREMIUM_TTS_VOICES.female
+          : "",
+    maleVoice:
+      englishProvider === "kokoro_server"
+        ? KOKORO_TTS_VOICES.male.label
+        : englishProvider === "gemini_tts"
+          ? PREMIUM_TTS_VOICES.male
+          : "",
+    available:
+      englishProvider === "kokoro_server"
+        ? state.kokoroStatus !== "error"
+        : englishProvider === "gemini_tts"
+          ? state.premiumTtsStatus !== "error"
+          : englishProvider !== "browser",
+    status:
+      englishProvider === "kokoro_server"
+        ? state.kokoroStatus
+        : englishProvider === "gemini_tts"
+          ? state.premiumTtsStatus
+          : "ready",
+    error:
+      englishProvider === "kokoro_server"
+        ? state.kokoroStatus === "error"
+          ? state.kokoroLastError
+          : ""
+        : englishProvider === "gemini_tts" && state.premiumTtsStatus === "error"
+          ? state.premiumTtsLastError
+          : "",
+    premiumStatus: state.premiumTtsStatus,
+    premiumError: state.premiumTtsLastError,
+    fallbackProvider: "browser",
+    languageProviders: {
+      english: englishProvider,
+      hindi: hindiProvider,
+      telugu: teluguProvider
+    },
+    nativeVoices: {
+      hindi: "",
+      telugu: ""
+    },
+    premiumVoices: {
+      hindi: hindiProvider === "gemini_tts" ? PREMIUM_TTS_VOICES.female : "",
+      telugu: teluguProvider === "gemini_tts" ? PREMIUM_TTS_VOICES.female : ""
+    }
+  };
+}
+
+function localSpeechRecognitionEnabled() {
+  return !isCloudMode();
+}
+
+function speechRecognitionProviderForLanguage(language) {
+  return localSpeechRecognitionEnabled() ? "local_whisper" : "browser";
+}
+
+function publicSpeechRecognitionConfig() {
+  if (!localSpeechRecognitionEnabled()) {
+    return {
+      provider: "browser",
+      available: false,
+      status: "disabled",
+      error: "Local speech recognition is only available in the desktop app."
+    };
+  }
+
+  const preferredProvider = speechRecognitionProviderForLanguage(preferredConversationLanguage());
+  const localAvailable = state.asrStatus !== "error";
+  const premiumFailed = premiumAsrEnabled() && state.premiumAsrStatus === "error";
+
+  return {
+    provider: preferredProvider,
+    available: localAvailable || !premiumFailed,
+    status:
+      preferredProvider === "gemini_asr"
+        ? premiumFailed && localAvailable
+          ? "fallback"
+          : state.premiumAsrStatus
+        : state.asrStatus,
+    error:
+      preferredProvider === "gemini_asr"
+        ? premiumFailed && !localAvailable
+          ? state.premiumAsrLastError
+          : ""
+        : state.asrStatus === "error"
+          ? state.asrLastError
+          : "",
+    premiumStatus: state.premiumAsrStatus,
+    premiumError: state.premiumAsrLastError,
+    languageProviders: {
+      english: speechRecognitionProviderForLanguage("english"),
+      hindi: speechRecognitionProviderForLanguage("hindi"),
+      telugu: speechRecognitionProviderForLanguage("telugu"),
+      auto: speechRecognitionProviderForLanguage("auto")
+    }
   };
 }
 
@@ -638,7 +2608,7 @@ function activeKnowledgeProvider(config) {
     return hasGemini ? "gemini" : hasOpenRouter ? "openrouter" : "gemini";
   }
 
-  return hasOpenRouter ? "openrouter" : hasGemini ? "gemini" : "gemini";
+  return hasGemini ? "gemini" : hasOpenRouter ? "openrouter" : "gemini";
 }
 
 function configuredOpenRouterModel(config) {
@@ -707,13 +2677,30 @@ function rememberKnowledgeTurn(role, text) {
   }
 }
 
-function knowledgeHistoryAsPrompt() {
-  if (!state.knowledgeHistory.length) {
+function trimPromptText(text, maxChars = PROMPT_TURN_CHAR_LIMIT) {
+  const value = String(text || "").replace(/\s+/g, " ").trim();
+  if (!value) {
+    return "";
+  }
+
+  if (value.length <= maxChars) {
+    return value;
+  }
+
+  return `${value.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
+}
+
+function knowledgeHistoryAsPrompt(limit = MAX_KNOWLEDGE_TURNS) {
+  if (!state.knowledgeHistory.length || limit <= 0) {
     return "";
   }
 
   return state.knowledgeHistory
-    .map((turn) => `${turn.role === "assistant" ? "Assistant" : "User"}: ${turn.text}`)
+    .slice(-limit)
+    .map(
+      (turn) =>
+        `${turn.role === "assistant" ? "Assistant" : "User"}: ${trimPromptText(turn.text)}`
+    )
     .join("\n");
 }
 
@@ -731,13 +2718,17 @@ function rememberConversationTurn(role, text) {
   }
 }
 
-function conversationHistoryAsPrompt() {
-  if (!state.conversationHistory.length) {
+function conversationHistoryAsPrompt(limit = MAX_CONVERSATION_TURNS) {
+  if (!state.conversationHistory.length || limit <= 0) {
     return "";
   }
 
   return state.conversationHistory
-    .map((turn) => `${turn.role === "assistant" ? "Assistant" : "User"}: ${turn.text}`)
+    .slice(-limit)
+    .map(
+      (turn) =>
+        `${turn.role === "assistant" ? "Assistant" : "User"}: ${trimPromptText(turn.text)}`
+    )
     .join("\n");
 }
 
@@ -774,6 +2765,285 @@ function cloneContactForContext(contact) {
   };
 }
 
+function defaultAssistantMemory() {
+  return {
+    recentContacts: [],
+    recentApps: [],
+    recentUrls: [],
+    recentPaths: [],
+    recentCommands: [],
+    recentShortcuts: []
+  };
+}
+
+function cloneAssistantMemory() {
+  return JSON.parse(JSON.stringify(state.assistantMemory || defaultAssistantMemory()));
+}
+
+function normalizeMemoryEntries(entries, mapper) {
+  if (!Array.isArray(entries)) {
+    return [];
+  }
+
+  return entries
+    .map((entry) => mapper(entry))
+    .filter(Boolean)
+    .sort((left, right) => Number(right.usedAt || 0) - Number(left.usedAt || 0))
+    .slice(0, 12);
+}
+
+function normalizeAssistantMemory(data) {
+  const memory = data && typeof data === "object" ? data : {};
+  return {
+    recentContacts: normalizeMemoryEntries(memory.recentContacts, (entry) => {
+      const contact = cloneContactForContext(entry);
+      if (!contact || !contact.displayName) {
+        return null;
+      }
+      return {
+        ...contact,
+        count: Math.max(1, Number(entry.count || 1)),
+        usedAt: Number(entry.usedAt || Date.now())
+      };
+    }),
+    recentApps: normalizeMemoryEntries(memory.recentApps, (entry) => {
+      const name = String(entry?.name || "").trim();
+      if (!name) {
+        return null;
+      }
+      return {
+        name,
+        count: Math.max(1, Number(entry.count || 1)),
+        usedAt: Number(entry.usedAt || Date.now())
+      };
+    }),
+    recentUrls: normalizeMemoryEntries(memory.recentUrls, (entry) => {
+      const url = String(entry?.url || "").trim();
+      if (!url) {
+        return null;
+      }
+      return {
+        url,
+        label: String(entry?.label || url).trim() || url,
+        count: Math.max(1, Number(entry.count || 1)),
+        usedAt: Number(entry.usedAt || Date.now())
+      };
+    }),
+    recentPaths: normalizeMemoryEntries(memory.recentPaths, (entry) => {
+      const targetPath = String(entry?.path || "").trim();
+      if (!targetPath) {
+        return null;
+      }
+      return {
+        path: targetPath,
+        label: String(entry?.label || targetPath).trim() || targetPath,
+        count: Math.max(1, Number(entry.count || 1)),
+        usedAt: Number(entry.usedAt || Date.now())
+      };
+    }),
+    recentCommands: normalizeMemoryEntries(memory.recentCommands, (entry) => {
+      const text = String(entry?.text || "").trim();
+      if (!text) {
+        return null;
+      }
+      return {
+        text,
+        count: Math.max(1, Number(entry.count || 1)),
+        usedAt: Number(entry.usedAt || Date.now())
+      };
+    }),
+    recentShortcuts: normalizeMemoryEntries(memory.recentShortcuts, (entry) => {
+      const name = String(entry?.name || "").trim();
+      if (!name) {
+        return null;
+      }
+      return {
+        name,
+        count: Math.max(1, Number(entry.count || 1)),
+        usedAt: Number(entry.usedAt || Date.now())
+      };
+    })
+  };
+}
+
+async function loadAssistantMemory() {
+  try {
+    const text = await fsp.readFile(ASSISTANT_MEMORY_PATH, "utf8");
+    state.assistantMemory = normalizeAssistantMemory(JSON.parse(text));
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      console.warn(`Jarvis could not read assistant memory: ${error.message}`);
+    }
+    state.assistantMemory = defaultAssistantMemory();
+  }
+}
+
+async function persistAssistantMemory() {
+  await fsp.mkdir(path.dirname(ASSISTANT_MEMORY_PATH), { recursive: true });
+  await fsp.writeFile(
+    ASSISTANT_MEMORY_PATH,
+    JSON.stringify(cloneAssistantMemory(), null, 2) + "\n",
+    "utf8"
+  );
+}
+
+function scheduleAssistantMemoryPersist() {
+  if (state.assistantMemoryPersistTimer) {
+    clearTimeout(state.assistantMemoryPersistTimer);
+  }
+  state.assistantMemoryPersistTimer = setTimeout(() => {
+    state.assistantMemoryPersistTimer = null;
+    persistAssistantMemory().catch(() => {});
+  }, 180);
+}
+
+function rememberMemoryEntry(bucket, entry, isSame) {
+  if (!bucket || !entry || typeof isSame !== "function") {
+    return;
+  }
+
+  if (!state.assistantMemory) {
+    state.assistantMemory = defaultAssistantMemory();
+  }
+
+  const list = Array.isArray(state.assistantMemory[bucket]) ? state.assistantMemory[bucket] : [];
+  const index = list.findIndex((item) => isSame(item, entry));
+  const current = index >= 0 ? list[index] : null;
+  const next = {
+    ...current,
+    ...entry,
+    count: Math.max(1, Number(current?.count || 0) + 1),
+    usedAt: Date.now()
+  };
+
+  if (index >= 0) {
+    list.splice(index, 1);
+  }
+  list.unshift(next);
+  state.assistantMemory[bucket] = list.slice(0, 12);
+  scheduleAssistantMemoryPersist();
+}
+
+function rememberContactMemory(contact) {
+  const safeContact = cloneContactForContext(contact);
+  if (!safeContact?.displayName) {
+    return;
+  }
+  rememberMemoryEntry(
+    "recentContacts",
+    safeContact,
+    (left, right) =>
+      normalizeWhatsappPhone(left?.phone || "") === normalizeWhatsappPhone(right?.phone || "") ||
+      normalizeText(left?.displayName || left?.key || "") ===
+        normalizeText(right?.displayName || right?.key || "")
+  );
+}
+
+function rememberAppMemory(name) {
+  const safeName = String(name || "").trim();
+  if (!safeName) {
+    return;
+  }
+  rememberMemoryEntry(
+    "recentApps",
+    { name: safeName },
+    (left, right) => normalizeText(left?.name || "") === normalizeText(right?.name || "")
+  );
+}
+
+function rememberUrlMemory(url, label = "") {
+  const safeUrl = String(url || "").trim();
+  if (!safeUrl) {
+    return;
+  }
+  rememberMemoryEntry(
+    "recentUrls",
+    {
+      url: safeUrl,
+      label: String(label || safeUrl).trim() || safeUrl
+    },
+    (left, right) => String(left?.url || "").trim() === String(right?.url || "").trim()
+  );
+}
+
+function rememberPathMemory(targetPath, label = "") {
+  const safePath = String(targetPath || "").trim();
+  if (!safePath) {
+    return;
+  }
+  rememberMemoryEntry(
+    "recentPaths",
+    {
+      path: safePath,
+      label: String(label || safePath).trim() || safePath
+    },
+    (left, right) => String(left?.path || "").trim() === String(right?.path || "").trim()
+  );
+}
+
+function rememberCommandMemory(text) {
+  const safeText = String(text || "").trim();
+  if (!safeText) {
+    return;
+  }
+  rememberMemoryEntry(
+    "recentCommands",
+    { text: safeText },
+    (left, right) => normalizeText(left?.text || "") === normalizeText(right?.text || "")
+  );
+}
+
+function rememberShortcutMemory(name) {
+  const safeName = String(name || "").trim();
+  if (!safeName) {
+    return;
+  }
+  rememberMemoryEntry(
+    "recentShortcuts",
+    { name: safeName },
+    (left, right) => normalizeText(left?.name || "") === normalizeText(right?.name || "")
+  );
+}
+
+function recentContactMemory() {
+  const entries = state.assistantMemory?.recentContacts;
+  return Array.isArray(entries) && entries.length ? cloneContactForContext(entries[0]) : null;
+}
+
+function recentAppMemory() {
+  const entries = state.assistantMemory?.recentApps;
+  return Array.isArray(entries) && entries.length ? String(entries[0].name || "").trim() : "";
+}
+
+function recentUrlMemory() {
+  const entries = state.assistantMemory?.recentUrls;
+  return Array.isArray(entries) && entries.length ? String(entries[0].url || "").trim() : "";
+}
+
+function recentPathMemory() {
+  const entries = state.assistantMemory?.recentPaths;
+  return Array.isArray(entries) && entries.length ? String(entries[0].path || "").trim() : "";
+}
+
+function contactMemoryScore(contact) {
+  const entries = Array.isArray(state.assistantMemory?.recentContacts)
+    ? state.assistantMemory.recentContacts
+    : [];
+  if (!entries.length || !contact) {
+    return 0;
+  }
+
+  const phone = normalizeWhatsappPhone(contact.phone || "");
+  const key = normalizeText(contact.key || contact.displayName || "");
+  const index = entries.findIndex((entry) => {
+    const entryPhone = normalizeWhatsappPhone(entry.phone || "");
+    const entryKey = normalizeText(entry.key || entry.displayName || "");
+    return (phone && entryPhone && phone === entryPhone) || (key && entryKey && key === entryKey);
+  });
+
+  return index === -1 ? 0 : entries.length - index;
+}
+
 function hasRealPhoneNumber(phone) {
   const rawValue = String(phone || "");
   const digits = rawValue.replace(/[^\d]/g, "");
@@ -786,6 +3056,25 @@ function rememberSessionContext(update) {
     ...update,
     updatedAt: Date.now()
   };
+
+  if (update?.lastContact) {
+    rememberContactMemory(update.lastContact);
+  }
+  if (update?.lastAppName) {
+    rememberAppMemory(update.lastAppName);
+  }
+  if (update?.lastUrl) {
+    rememberUrlMemory(update.lastUrl, update.lastUrlLabel || update.lastUrl);
+  }
+  if (update?.lastPath) {
+    rememberPathMemory(update.lastPath, update.lastPathLabel || update.lastPath);
+  }
+  if (update?.lastUserCommand) {
+    rememberCommandMemory(update.lastUserCommand);
+  }
+  if (update?.lastShortcutName) {
+    rememberShortcutMemory(update.lastShortcutName);
+  }
 }
 
 function resolveContact(config, spokenName) {
@@ -853,6 +3142,7 @@ function findContactByPrefix(config, remainder) {
 function finalizeMessageIntent(config, spokenName, message) {
   const contact = resolveContact(config, spokenName);
   const cleanedMessage = cleanWhatsappMessage(message);
+  const language = effectiveConversationLanguage(`${spokenName} ${message}`);
 
   if (!contact) {
     return {
@@ -863,9 +3153,11 @@ function finalizeMessageIntent(config, spokenName, message) {
   }
 
   if (!cleanedMessage) {
-    return createReply(
-      `Tell me what message to send to ${contactLabel(contact)}.`
-    );
+    return createReply(localizedResponse("tellMessageToSend", {
+      contact: contactLabel(contact)
+    }, language), {
+      conversationLanguage: language
+    });
   }
 
   return {
@@ -883,8 +3175,10 @@ function parseMessageIntent(rawText, config) {
   );
 
   const patternMatches = [
+    /^(?:send|message|text)\s+(?:a\s+)?message\s+to\s+(.+?)\s+(?:saying|that|with message)\s+(.+)$/i,
     /^(?:send(?: a)?(?: whatsapp)?(?: message)? to)\s+(.+?)\s+(?:saying|that|with message)\s+(.+)$/i,
     /^(?:send(?: a)?(?: whatsapp)?(?: message)? to)\s+(.+?)\s+(.+)$/i,
+    /^(?:send|message|text)\s+(.+?)\s+(?:saying|that|with message)\s+(.+)$/i,
     /^(?:send|message|text)\s+(.+?)\s+(?:on|via|in)\s+whatsapp\s+(?:saying|that|with message)?\s*(.+)$/i,
     /^(?:send|message|text)\s+(.+?)\s+(?:a\s+)?whatsapp\s+(?:saying|that|with message)?\s*(.+)$/i,
     /^(?:tell)\s+(.+?)\s+(?:on|via|in)\s+whatsapp\s+(?:that|saying)?\s*(.+)$/i,
@@ -910,6 +3204,30 @@ function parseMessageIntent(rawText, config) {
     );
   }
 
+  const hindiPatterns = [
+    /^(.+?)\s+को\s+(?:व्हाट्सएप|व्हॉट्सऐप|वॉट्सऐप|whatsapp)(?:\s+पर)?\s+(?:मैसेज|message|संदेश)?\s*(?:भेजो|भेजना|करो)\s*(?:कि)?\s+(.+)$/u,
+    /^(?:व्हाट्सएप|व्हॉट्सऐप|वॉट्सऐप|whatsapp)\s+(.+?)\s+को\s+(?:कहना|बोलो|message)\s+(.+)$/u
+  ];
+
+  for (const pattern of hindiPatterns) {
+    const match = withPreambleRemoved.match(pattern);
+    if (match) {
+      return finalizeMessageIntent(config, match[1], match[2]);
+    }
+  }
+
+  const teluguPatterns = [
+    /^(.+?)\s+(?:కి|కు)\s+(?:వాట్సాప్|వాట్సప్|whatsapp)(?:\s+లో)?\s+(?:మెసేజ్|message)?\s*(?:పంపు|పంపించు|చెప్పు)\s*(?:అని)?\s+(.+)$/u,
+    /^(?:వాట్సాప్|వాట్సప్|whatsapp)\s+(.+?)\s+(?:కి|కు)\s*(?:అని)?\s+(.+)$/u
+  ];
+
+  for (const pattern of teluguPatterns) {
+    const match = withPreambleRemoved.match(pattern);
+    if (match) {
+      return finalizeMessageIntent(config, match[1], match[2]);
+    }
+  }
+
   const directPrefix = withPreambleRemoved.match(/^(?:message|whatsapp)\s+(.+)$/i);
   if (directPrefix) {
     const parsed = findContactByPrefix(config, directPrefix[1]);
@@ -925,13 +3243,95 @@ function parseMessageIntent(rawText, config) {
   return null;
 }
 
+function parseConversationLanguageIntent(rawText) {
+  const raw = String(rawText || "").trim();
+  if (!raw) {
+    return null;
+  }
+
+  const normalized = normalizeText(raw);
+  let language = null;
+
+  const englishMatch = raw.match(
+    /(?:switch|talk|speak|reply|respond|chat|converse)(?:\s+(?:to|with)\s+me)?\s+(?:in|using)?\s*(english|hindi|telugu)\b/i
+  );
+  if (englishMatch) {
+    language = normalizeConversationLanguage(englishMatch[1]);
+  }
+
+  if (!language) {
+    const modeMatch = raw.match(/\b(english|hindi|telugu)\s+mode\b/i);
+    if (modeMatch) {
+      language = normalizeConversationLanguage(modeMatch[1]);
+    }
+  }
+
+  if (
+    !language &&
+    /(?:auto|automatic|default)\s+language\b/i.test(raw)
+  ) {
+    language = "auto";
+  }
+
+  if (
+    !language &&
+    /(?:हिंदी|हिन्दी)/u.test(raw) &&
+    /(?:में|मे).*(?:बोलो|बात करो|जवाब दो|उत्तर दो)|(?:बोलो|बात करो|जवाब दो|उत्तर दो)/u.test(raw)
+  ) {
+    language = "hindi";
+  }
+
+  if (
+    !language &&
+    /(?:अंग्रेज़ी|अंग्रेजी|इंग्लिश)/u.test(raw) &&
+    /(?:में|मे).*(?:बोलो|बात करो|जवाब दो|उत्तर दो)|(?:बोलो|बात करो|जवाब दो|उत्तर दो)/u.test(raw)
+  ) {
+    language = "english";
+  }
+
+  if (
+    !language &&
+    /తెలుగు/u.test(raw) &&
+    /(?:లో).*(?:మాట్లాడు|మాట్లాడండి|సమాధానం చెప్పు|చెప్పు)|(?:మాట్లాడు|మాట్లాడండి|చెప్పు)/u.test(raw)
+  ) {
+    language = "telugu";
+  }
+
+  if (
+    !language &&
+    /ఇంగ్లీష్/u.test(raw) &&
+    /(?:లో).*(?:మాట్లాడు|మాట్లాడండి|సమాధానం చెప్పు|చెప్పు)|(?:మాట్లాడు|మాట్లాడండి|చెప్పు)/u.test(raw)
+  ) {
+    language = "english";
+  }
+
+  if (
+    !language &&
+    /\benglish\b/i.test(raw) &&
+    /\b(?:speak|talk|reply|respond|language)\b/i.test(raw)
+  ) {
+    language = "english";
+  }
+
+  if (!language) {
+    return null;
+  }
+
+  return {
+    type: "setConversationLanguage",
+    language
+  };
+}
+
 function parseFollowUpMessageIntent(rawText) {
-  const lastContact = state.sessionContext.lastContact;
+  const lastContact = state.sessionContext.lastContact || recentContactMemory();
   if (!lastContact) {
     return null;
   }
 
   const patterns = [
+    /^(?:send|message|text|whatsapp)\s+(?:the\s+)?same\s+(?:person|contact)\s+(?:saying|that|with message)\s+(.+)$/i,
+    /^(?:send|message|text|whatsapp)\s+to\s+(?:the\s+)?same\s+(?:person|contact)\s+(?:saying|that|with message)\s+(.+)$/i,
     /^(?:send|message|text|whatsapp|reply(?: to)?|answer)\s+(?:him|her|them)\s+(?:saying|that|with message)\s+(.+)$/i,
     /^(?:tell)\s+(?:him|her|them)\s+(.+)$/i,
     /^(?:reply|answer)\s+(?:saying|that|with message)\s+(.+)$/i,
@@ -954,6 +3354,138 @@ function parseFollowUpMessageIntent(rawText) {
       type: "whatsapp",
       contact: cloneContactForContext(lastContact),
       message
+    };
+  }
+
+  return null;
+}
+
+function parseScheduledMessagesIntent(rawText) {
+  return /^(?:show|list|check)\s+(?:my\s+)?scheduled messages$/i.test(String(rawText || "").trim())
+    ? { type: "showScheduledMessages" }
+    : null;
+}
+
+function parseCancelScheduledMessageIntent(rawText) {
+  const match = String(rawText || "")
+    .trim()
+    .match(
+      /^(?:cancel|delete|remove)\s+(?:the\s+)?scheduled\s+(?:whatsapp|message)(?:\s+number)?\s*(.+)?$/i
+    );
+  if (!match) {
+    return null;
+  }
+
+  return {
+    type: "cancelScheduledMessage",
+    selectorText: String(match[1] || "").trim()
+  };
+}
+
+function parseRescheduleScheduledMessageIntent(rawText) {
+  const text = String(rawText || "").trim();
+  const match = text.match(
+    /^(?:reschedule|move|change)\s+(?:the\s+)?scheduled\s+(?:whatsapp|message)(?:\s+number)?\s*(.+?)\s+(?:to|for)\s+(.+)$/i
+  );
+  if (!match) {
+    return null;
+  }
+
+  const sendAt = parseScheduledDateTimeExpression(match[2]);
+  if (!sendAt) {
+    return createReply(
+      `Tell me the new time clearly, like "reschedule scheduled message 2 to tomorrow at 6 pm".`
+    );
+  }
+
+  return {
+    type: "rescheduleScheduledMessage",
+    selectorText: String(match[1] || "").trim(),
+    sendAt: sendAt.toISOString()
+  };
+}
+
+function parseEditScheduledMessageIntent(rawText) {
+  const text = String(rawText || "").trim();
+  const patterns = [
+    /^(?:edit|change|update)\s+(?:the\s+)?scheduled\s+(?:whatsapp|message)(?:\s+number)?\s*(.+?)\s+(?:to say|saying|with message)\s+(.+)$/i,
+    /^(?:change|update)\s+(?:the\s+)?scheduled\s+(?:whatsapp|message)(?:\s+number)?\s*(.+?)\s+to\s+(.+)$/i
+  ];
+
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (!match) {
+      continue;
+    }
+
+    const nextMessage = cleanWhatsappMessage(match[2]);
+    if (!nextMessage) {
+      return createReply(`Tell me the new message text too.`);
+    }
+
+    return {
+      type: "editScheduledMessage",
+      selectorText: String(match[1] || "").trim(),
+      message: nextMessage
+    };
+  }
+
+  return null;
+}
+
+function parseScheduledMessageIntent(rawText, config) {
+  const extracted = extractScheduledCommand(rawText);
+  if (!extracted) {
+    return null;
+  }
+
+  const explicitScheduleCue = /^(?:please\s+)?(?:schedule|for later)\b/i.test(String(rawText || "").trim());
+  if (!explicitScheduleCue && /^at\s+/i.test(extracted.timeText || "")) {
+    return null;
+  }
+
+  let commandText = extracted.commandText
+    .replace(/^(?:please\s+)?schedule\s+/i, "")
+    .replace(/^(?:please\s+)?for\s+later\s+/i, "")
+    .replace(/^(?:a|an)\s+(?=(?:whatsapp|message|text)\b)/i, "")
+    .trim();
+  commandText = commandText.replace(/^whatsapp\s+to\s+/i, "send whatsapp to ");
+  commandText = commandText.replace(/^(?:message|text)\s+to\s+/i, "send message to ");
+
+  if (!commandText) {
+    return null;
+  }
+
+  const parsed =
+    parseMessageIntent(commandText, config) || parseFollowUpMessageIntent(commandText);
+  if (!parsed) {
+    return null;
+  }
+  if (parsed.reply) {
+    return parsed;
+  }
+
+  const language = effectiveConversationLanguage(rawText);
+  const baseIntent = {
+    sendAt: extracted.sendAt.toISOString(),
+    conversationLanguage: language
+  };
+
+  if (parsed.type === "whatsapp") {
+    return {
+      type: "scheduleWhatsapp",
+      ...baseIntent,
+      contact: parsed.contact,
+      message: parsed.message
+    };
+  }
+
+  if (parsed.type === "whatsappLookup") {
+    return {
+      type: "scheduleWhatsappLookup",
+      ...baseIntent,
+      spokenName: parsed.spokenName,
+      message: parsed.message
     };
   }
 
@@ -1336,7 +3868,9 @@ function expandHome(inputPath) {
 }
 
 function parseOpenIntent(rawText, config) {
-  const match = rawText.match(/^(?:open|launch|start)\s+(.+)$/i);
+  const match = rawText.match(
+    /^(?:open|launch|start|खोलो|खोल दीजिए|khol(?:o|do)?|తెరువు|తెరవండి|ఓపెన్ చెయ్యి|open cheyyi|open cheyi)\s+(.+)$/iu
+  );
   if (!match) {
     return null;
   }
@@ -1534,6 +4068,61 @@ function parseRenameIntent(rawText) {
   };
 }
 
+function parseVoiceModeIntent(rawText, config, metadata = {}) {
+  const normalized = normalizeText(rawText);
+  if (!normalized) {
+    return null;
+  }
+
+  const voicePatterns = [
+    /^(?:change|switch|set)(?: your| the)?(?: voice| voice mode)(?: to)?\s+(male|female)\b/,
+    /^(?:use|reply|speak|talk)(?: in| with)?\s+(male|female)\s+voice\b/,
+    /^(?:switch to|change to|set to|use)\s+(male|female)(?:\s+voice)?$/
+  ];
+
+  let voiceMode = "";
+  for (const pattern of voicePatterns) {
+    const match = normalized.match(pattern);
+    if (match) {
+      voiceMode = match[1];
+      break;
+    }
+  }
+
+  if (!voiceMode) {
+    if (/^(?:change|switch|set)(?: your| the)?(?: voice| voice mode)\b/.test(normalized)) {
+      const language = effectiveConversationLanguage(metadata.rawTranscript || rawText);
+      return createReply(
+        `Say "${config.assistantName}, change your voice to male" or "${config.assistantName}, change your voice to female."`,
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+    return null;
+  }
+
+  const inputSource = normalizeText(metadata.inputSource || "unknown");
+  const addressedToAssistant =
+    Boolean(metadata.wakeMatched) ||
+    parseAssistantAddress(metadata.rawTranscript, config.assistantName).addressed;
+
+  if (inputSource === "speech" && !addressedToAssistant) {
+    const language = effectiveConversationLanguage(metadata.rawTranscript || rawText);
+    return createReply(
+      `Say "${config.assistantName}, change your voice to ${voiceMode}" if you want me to switch voices.`,
+      {
+        conversationLanguage: language
+      }
+    );
+  }
+
+  return {
+    type: "setVoiceMode",
+    voiceMode
+  };
+}
+
 function parseHistoryIntent(rawText) {
   return /^(history|show history|conversation history|show conversation)$/i.test(
     normalizeText(rawText)
@@ -1558,10 +4147,10 @@ function parseQuitIntent(rawText, config) {
     return null;
   }
 
-  if (["it", "that"].includes(normalizedTarget) && state.sessionContext.lastAppName) {
+  if (["it", "that"].includes(normalizedTarget) && (state.sessionContext.lastAppName || recentAppMemory())) {
     return {
       type: "quitApp",
-      appName: state.sessionContext.lastAppName
+      appName: state.sessionContext.lastAppName || recentAppMemory()
     };
   }
 
@@ -1579,27 +4168,27 @@ function parseContextualReopenIntent(rawText) {
     return null;
   }
 
-  if (state.sessionContext.lastAppName) {
+  if (state.sessionContext.lastAppName || recentAppMemory()) {
     return {
       type: "openApp",
-      appName: state.sessionContext.lastAppName,
-      label: state.sessionContext.lastAppName
+      appName: state.sessionContext.lastAppName || recentAppMemory(),
+      label: state.sessionContext.lastAppName || recentAppMemory()
     };
   }
 
-  if (state.sessionContext.lastUrl) {
+  if (state.sessionContext.lastUrl || recentUrlMemory()) {
     return {
       type: "openUrl",
-      url: state.sessionContext.lastUrl,
-      label: state.sessionContext.lastUrl
+      url: state.sessionContext.lastUrl || recentUrlMemory(),
+      label: state.sessionContext.lastUrl || recentUrlMemory()
     };
   }
 
-  if (state.sessionContext.lastPath) {
+  if (state.sessionContext.lastPath || recentPathMemory()) {
     return {
       type: "openPath",
-      path: state.sessionContext.lastPath,
-      label: state.sessionContext.lastPath
+      path: state.sessionContext.lastPath || recentPathMemory(),
+      label: state.sessionContext.lastPath || recentPathMemory()
     };
   }
 
@@ -1704,10 +4293,15 @@ async function callGeminiPlanner(rawText, config) {
   const model = config.knowledge?.model || DEFAULT_CONFIG.knowledge.model;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
   const plannerContext = summarizePlannerContext(config);
-  const conversationHistory = conversationHistoryAsPrompt();
+  const conversationHistory = conversationHistoryAsPrompt(PROMPT_CONVERSATION_TURNS);
+  const preferredLanguage = preferredConversationLanguage();
   const prompt = [
     `You are a planner for ${config.assistantName}, a desktop voice assistant.`,
     `Convert the user's request into safe structured actions when possible.`,
+    `Preferred conversation language: ${conversationLanguageLabel(preferredLanguage)}.`,
+    preferredLanguage === "auto"
+      ? `Mirror the user's language and script in the JSON "response" field.`
+      : `Use ${conversationLanguageLabel(preferredLanguage)} in the JSON "response" field.`,
     `Return JSON only, with no markdown fences or extra text.`,
     `JSON schema:`,
     `{`,
@@ -1745,6 +4339,7 @@ async function callGeminiPlanner(rawText, config) {
     `- Use spotify_control for Spotify playback requests.`,
     `- Use search_site for site-specific search requests like YouTube, GitHub, or Gmail.`,
     `- Use whatsapp_name for a contact name that is not in configured contact keys but may exist in Mac Contacts.`,
+    `- Preserve Hindi and Telugu contact names and message text exactly as the user said them.`,
     `- Use knowledge_query when information lookup is one step inside a larger actionable task.`,
     `- Use ui_panel for requests to show commands, history, or close the panel.`,
     `- When mixing steps, place the step whose spoken result matters most at the end.`,
@@ -1820,6 +4415,49 @@ function openRouterRequestBody(messages, config, extras = {}) {
   return body;
 }
 
+function ttsCacheKey(text, voiceMode, language) {
+  return `${normalizeConversationLanguage(language) || "english"}|${
+    voiceMode === "male" ? "male" : "female"
+  }|${String(text || "").trim()}`;
+}
+
+function readTtsCache(text, voiceMode, language) {
+  const key = ttsCacheKey(text, voiceMode, language);
+  const cached = state.ttsCache.get(key);
+  if (!cached) {
+    return null;
+  }
+
+  state.ttsCache.delete(key);
+  state.ttsCache.set(key, cached);
+  return {
+    buffer: Buffer.from(cached.buffer),
+    contentType: cached.contentType,
+    voiceName: cached.voiceName
+  };
+}
+
+function writeTtsCache(text, voiceMode, language, audio) {
+  const safeText = String(text || "").trim();
+  if (!safeText || safeText.length > 180 || !audio?.buffer?.length) {
+    return;
+  }
+
+  state.ttsCache.set(ttsCacheKey(safeText, voiceMode, language), {
+    buffer: Buffer.from(audio.buffer),
+    contentType: audio.contentType,
+    voiceName: audio.voiceName
+  });
+
+  while (state.ttsCache.size > 48) {
+    const oldestKey = state.ttsCache.keys().next().value;
+    if (!oldestKey) {
+      break;
+    }
+    state.ttsCache.delete(oldestKey);
+  }
+}
+
 function extractOpenRouterReply(payload) {
   const content = payload?.choices?.[0]?.message?.content;
   if (Array.isArray(content)) {
@@ -1839,6 +4477,49 @@ function extractOpenRouterReply(payload) {
   return String(content || "").trim();
 }
 
+function extractOpenRouterDeltaText(payload) {
+  const content = payload?.choices?.[0]?.delta?.content;
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part === "string"
+          ? part
+          : typeof part?.text === "string"
+            ? part.text
+            : ""
+      )
+      .join("");
+  }
+
+  return typeof content === "string" ? content : "";
+}
+
+function buildOpenRouterKnowledgeMessages(query, config) {
+  const conversationHistory = conversationHistoryAsPrompt(PROMPT_KNOWLEDGE_TURNS);
+  const preferredLanguage = preferredConversationLanguage();
+  const systemPrompt = [
+    `You are ${config.assistantName}, a voice-first desktop assistant.`,
+    `Answer clearly and naturally for spoken output.`,
+    `Keep replies brief unless the user asks for more detail.`,
+    preferredLanguage === "auto"
+      ? `Reply in the same language and script the user used.`
+      : `Reply in ${conversationLanguageLabel(preferredLanguage)} unless the user explicitly asks for another language.`,
+    `Be honest when something may depend on current events or live web data.`,
+    `If the user asks for a laptop action that is not currently configured, say that plainly instead of pretending it succeeded.`
+  ].join("\n");
+  const userPrompt = [
+    conversationHistory ? `Recent conversation:\n${conversationHistory}` : "",
+    `Current user request: ${trimPromptText(query, 600)}`
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  return [
+    { role: "system", content: systemPrompt },
+    { role: "user", content: userPrompt }
+  ];
+}
+
 async function callOpenRouterPlanner(rawText, config) {
   const apiKey = openRouterApiKey();
   if (!apiKey) {
@@ -1846,10 +4527,15 @@ async function callOpenRouterPlanner(rawText, config) {
   }
 
   const plannerContext = summarizePlannerContext(config);
-  const conversationHistory = conversationHistoryAsPrompt();
+  const conversationHistory = conversationHistoryAsPrompt(PROMPT_CONVERSATION_TURNS);
+  const preferredLanguage = preferredConversationLanguage();
   const prompt = [
     `You are a planner for ${config.assistantName}, a desktop voice assistant.`,
     `Convert the user's request into safe structured actions when possible.`,
+    `Preferred conversation language: ${conversationLanguageLabel(preferredLanguage)}.`,
+    preferredLanguage === "auto"
+      ? `Mirror the user's language and script in the JSON "response" field.`
+      : `Use ${conversationLanguageLabel(preferredLanguage)} in the JSON "response" field.`,
     `Return JSON only, with no markdown fences or extra text.`,
     `JSON schema:`,
     `{`,
@@ -1887,6 +4573,7 @@ async function callOpenRouterPlanner(rawText, config) {
     `- Use spotify_control for Spotify playback requests.`,
     `- Use search_site for site-specific search requests like YouTube, GitHub, or Gmail.`,
     `- Use whatsapp_name for a contact name that is not in configured contact keys but may exist in Mac Contacts.`,
+    `- Preserve Hindi and Telugu contact names and message text exactly as the user said them.`,
     `- Use knowledge_query when information lookup is one step inside a larger actionable task.`,
     `- Use ui_panel for requests to show commands, history, or close the panel.`,
     `- When mixing steps, place the step whose spoken result matters most at the end.`,
@@ -1956,13 +4643,16 @@ function parseCustomIntent(rawText, config) {
   return null;
 }
 
-function handleIntent(rawText, config) {
+function handleIntent(rawText, config, metadata = {}) {
   const cleanText = stripWakeWords(rawText, config.assistantName);
   const userProfile = readUserProfile();
   const currentName = currentUserDisplayName(userProfile);
+  const language = effectiveConversationLanguage(cleanText);
 
   if (!cleanText.trim()) {
-    return createReply(`I'm listening.`);
+    return createReply(localizedResponse("listening", {}, language), {
+      conversationLanguage: language
+    });
   }
 
   if (parseGreetingIntent(cleanText)) {
@@ -1973,15 +4663,26 @@ function handleIntent(rawText, config) {
     return createReply(`You are ${currentName}.`);
   }
 
+  const languageIntent = parseConversationLanguageIntent(cleanText);
+  if (languageIntent) {
+    return languageIntent;
+  }
+
   const renameIntent = parseRenameIntent(cleanText);
   if (renameIntent) {
     return renameIntent;
+  }
+
+  const voiceModeIntent = parseVoiceModeIntent(cleanText, config, metadata);
+  if (voiceModeIntent) {
+    return voiceModeIntent;
   }
 
   if (parseHelpIntent(cleanText)) {
     return createReply(
       `Showing your command list. You can ask me to open apps, sites, folders, search Google, send WhatsApp messages, run macOS Shortcuts, or answer general questions.`,
       {
+        conversationLanguage: language,
         uiPanel: "commands"
       }
     );
@@ -1989,12 +4690,34 @@ function handleIntent(rawText, config) {
 
   if (parseHistoryIntent(cleanText)) {
     return createReply(`Showing your recent conversation history.`, {
+      conversationLanguage: language,
       uiPanel: "history"
     });
   }
 
+  const scheduledMessagesIntent = parseScheduledMessagesIntent(cleanText);
+  if (scheduledMessagesIntent) {
+    return scheduledMessagesIntent;
+  }
+
+  const cancelScheduledIntent = parseCancelScheduledMessageIntent(cleanText);
+  if (cancelScheduledIntent) {
+    return cancelScheduledIntent;
+  }
+
+  const rescheduleScheduledIntent = parseRescheduleScheduledMessageIntent(cleanText);
+  if (rescheduleScheduledIntent) {
+    return rescheduleScheduledIntent;
+  }
+
+  const editScheduledIntent = parseEditScheduledMessageIntent(cleanText);
+  if (editScheduledIntent) {
+    return editScheduledIntent;
+  }
+
   if (parseClosePanelIntent(cleanText)) {
     return createReply(`Closing the panel.`, {
+      conversationLanguage: language,
       uiPanel: "none"
     });
   }
@@ -2063,28 +4786,35 @@ function handleIntent(rawText, config) {
     return contextualSpotifyIntent;
   }
 
+  const scheduledMessageIntent = parseScheduledMessageIntent(cleanText, config);
+  if (scheduledMessageIntent) {
+    if (scheduledMessageIntent.reply) {
+      return scheduledMessageIntent;
+    }
+
+    if (scheduledMessageIntent.type === "scheduleWhatsapp") {
+      return rememberPending(
+        scheduledMessageIntent,
+        readyScheduledWhatsappPrompt(
+          scheduledMessageIntent.contact,
+          scheduledMessageIntent.message,
+          scheduledMessageIntent.sendAt,
+          scheduledMessageIntent.conversationLanguage || language
+        )
+      );
+    }
+
+    return scheduledMessageIntent;
+  }
+
   const messageIntent = parseMessageIntent(cleanText, config);
   if (messageIntent) {
-    const recipientLabel =
-      messageIntent.contact
-        ? contactLabel(messageIntent.contact)
-        : messageIntent.spokenName || "that contact";
-    return rememberPending(
-      messageIntent,
-      `Ready to ${config.messageDelivery === "autoSend" ? "send" : "draft"} a WhatsApp message to ${
-        recipientLabel
-      }: "${messageIntent.message}". Say yes to continue or no to cancel.`
-    );
+    return messageIntent;
   }
 
   const followUpMessageIntent = parseFollowUpMessageIntent(cleanText);
   if (followUpMessageIntent) {
-    return rememberPending(
-      followUpMessageIntent,
-      `Ready to ${config.messageDelivery === "autoSend" ? "send" : "draft"} another WhatsApp message to ${
-        contactLabel(followUpMessageIntent.contact)
-      }: "${followUpMessageIntent.message}". Say yes to continue or no to cancel.`
-    );
+    return followUpMessageIntent;
   }
 
   if (looksLikeCompoundCommand(cleanText)) {
@@ -2167,10 +4897,15 @@ async function callGeminiKnowledge(query, config) {
 
   const model = config.knowledge?.model || DEFAULT_CONFIG.knowledge.model;
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`;
-  const conversationHistory = conversationHistoryAsPrompt();
+  const conversationHistory = conversationHistoryAsPrompt(PROMPT_KNOWLEDGE_TURNS);
+  const preferredLanguage = preferredConversationLanguage();
   const prompt = [
     `You are ${config.assistantName}, a voice-first desktop assistant.`,
     `Answer clearly and naturally for spoken output.`,
+    `Keep replies brief unless the user asks for more detail.`,
+    preferredLanguage === "auto"
+      ? `Reply in the same language and script the user used.`
+      : `Reply in ${conversationLanguageLabel(preferredLanguage)} unless the user explicitly asks for another language.`,
     `When Google Search grounding is available, use it for factual or recent information.`,
     `Prefer authoritative or reputable sources, and include concrete dates when the answer depends on current events.`,
     `If the user asks for a laptop action that is not currently configured, say that plainly instead of pretending it succeeded.`,
@@ -2240,27 +4975,18 @@ async function callOpenRouterKnowledge(query, config) {
     );
   }
 
-  const conversationHistory = conversationHistoryAsPrompt();
-  const prompt = [
-    `You are ${config.assistantName}, a voice-first desktop assistant.`,
-    `Answer clearly and naturally for spoken output.`,
-    `Be honest when something may depend on current events or live web data.`,
-    `If the user asks for a laptop action that is not currently configured, say that plainly instead of pretending it succeeded.`,
-    conversationHistory ? `Recent conversation:\n${conversationHistory}` : "",
-    `Current user request: ${query}`
-  ]
-    .filter(Boolean)
-    .join("\n\n");
+  const messages = buildOpenRouterKnowledgeMessages(query, config);
 
   const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: openRouterHeaders(apiKey),
     body: JSON.stringify(
       openRouterRequestBody(
-        [{ role: "user", content: prompt }],
+        messages,
         config,
         {
-          temperature: 0.2
+          temperature: 0.15,
+          max_tokens: OPENROUTER_FAST_MAX_TOKENS
         }
       )
     )
@@ -2288,6 +5014,114 @@ async function callOpenRouterKnowledge(query, config) {
   rememberKnowledgeTurn("assistant", reply);
 
   return createReply(reply, {
+    status: "completed",
+    knowledge: true,
+    grounded: false,
+    sources: []
+  });
+}
+
+async function callOpenRouterKnowledgeStream(query, config, handlers = {}) {
+  const apiKey = openRouterApiKey();
+  if (!apiKey) {
+    return createReply(
+      `World knowledge is ready, but no OpenRouter key is configured yet. Add OPENROUTER_API_KEY to /Users/haindavlyada/Documents/jar/.env and restart the server.`
+    );
+  }
+
+  const messages = buildOpenRouterKnowledgeMessages(query, config);
+  const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: openRouterHeaders(apiKey),
+    body: JSON.stringify(
+      openRouterRequestBody(messages, config, {
+        temperature: 0.15,
+        max_tokens: OPENROUTER_FAST_MAX_TOKENS,
+        stream: true
+      })
+    )
+  });
+
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    const apiMessage = extractProviderErrorMessage(
+      payload,
+      response.status,
+      "openrouter"
+    );
+    if (isQuotaExceededMessage(apiMessage, response.status)) {
+      return quotaExceededReply("openrouter");
+    }
+    return createReply(`I couldn't reach OpenRouter right now: ${apiMessage}`);
+  }
+
+  const reader = response.body?.getReader?.();
+  if (!reader) {
+    return callOpenRouterKnowledge(query, config);
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let reply = "";
+
+  const processLine = async (line) => {
+    const trimmed = String(line || "").trim();
+    if (!trimmed || !trimmed.startsWith("data:")) {
+      return;
+    }
+
+    const data = trimmed.slice(5).trim();
+    if (!data || data === "[DONE]") {
+      return;
+    }
+
+    let payload = null;
+    try {
+      payload = JSON.parse(data);
+    } catch (error) {
+      return;
+    }
+
+    const deltaText = extractOpenRouterDeltaText(payload);
+    if (!deltaText) {
+      return;
+    }
+
+    reply += deltaText;
+    if (typeof handlers.onDelta === "function") {
+      await handlers.onDelta(reply, deltaText);
+    }
+  };
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      await processLine(line);
+      newlineIndex = buffer.indexOf("\n");
+    }
+  }
+
+  if (buffer.trim()) {
+    await processLine(buffer);
+  }
+
+  const finalReply = String(reply || "").trim();
+  if (!finalReply) {
+    return createReply(`OpenRouter returned an empty response. Please try again.`);
+  }
+
+  rememberKnowledgeTurn("user", query);
+  rememberKnowledgeTurn("assistant", finalReply);
+
+  return createReply(finalReply, {
     status: "completed",
     knowledge: true,
     grounded: false,
@@ -2506,6 +5340,7 @@ async function executePlannedSteps(steps, config) {
   }
 
   const summaries = [];
+  const clientActions = [];
   for (const step of steps) {
     const intent = plannerStepToIntent(step, config);
     if (!intent) {
@@ -2515,11 +5350,17 @@ async function executePlannedSteps(steps, config) {
     }
     const result = await executeIntent(intent, config);
     summaries.push(result.reply);
+    if (Array.isArray(result.clientActions) && result.clientActions.length) {
+      clientActions.push(...result.clientActions);
+    }
   }
 
-  return createReply(summaries[summaries.length - 1], {
-    status: "completed"
-  });
+  return withClientActions(
+    createReply(summaries[summaries.length - 1], {
+      status: "completed"
+    }),
+    clientActions
+  );
 }
 
 function extractGeminiReply(payload) {
@@ -2556,6 +5397,14 @@ function extractGroundingSources(payload) {
 }
 
 async function lookupMacContact(spokenName) {
+  const matches = await lookupMacContacts(spokenName);
+  if (Array.isArray(matches)) {
+    return matches[0] || null;
+  }
+  return matches;
+}
+
+async function lookupMacContacts(spokenName) {
   if (process.platform !== "darwin") {
     return null;
   }
@@ -2565,38 +5414,65 @@ async function lookupMacContact(spokenName) {
     return null;
   }
 
+  const sqliteMatches = await lookupMacContactsInSqlite(query, spokenName);
+  if (sqliteMatches.length) {
+    return sqliteMatches;
+  }
+
   const scriptLines = [
-    "const Contacts = Application('Contacts');",
+    "const Contacts = Application('/System/Applications/Contacts.app');",
     "const query = " + JSON.stringify(query) + ";",
-    "const normalize = (value) => String(value || '').toLowerCase().replace(/[^\\p{L}\\p{N}\\s]/gu, ' ').replace(/\\s+/g, ' ').trim();",
-    "const people = Contacts.people();",
+    "const normalize = (value) => String(value || '').toLowerCase().replace(/[^a-z0-9\\u0900-\\u097f\\u0c00-\\u0c7f\\s]/g, ' ').replace(/\\s+/g, ' ').trim();",
+    "const queryTokens = normalize(query).split(' ').filter(Boolean);",
     "const matches = [];",
-    "for (const person of people) {",
+    "for (const person of Contacts.people()) {",
     "  const name = person.name();",
     "  const normalizedName = normalize(name);",
     "  if (!normalizedName) continue;",
-    "  if (!(normalizedName === query || normalizedName.includes(query) || query.includes(normalizedName))) continue;",
-    "  const phones = person.phones();",
-    "  for (const phone of phones) {",
-    "    matches.push({ name, phone: phone.value(), exact: normalizedName === query ? 1 : 0 });",
+    "  let score = 0;",
+    "  if (normalizedName === query) score = 100;",
+    "  else if (normalizedName.startsWith(query) || query.startsWith(normalizedName)) score = 75;",
+    "  else if (normalizedName.includes(query) || query.includes(normalizedName)) score = 55;",
+    "  if (queryTokens.length) {",
+    "    let tokenHits = 0;",
+    "    const nameTokens = normalizedName.split(' ').filter(Boolean);",
+    "    for (const token of queryTokens) {",
+    "      if (nameTokens.some((nameToken) => nameToken === token || nameToken.startsWith(token) || token.startsWith(nameToken))) tokenHits += 1;",
+    "    }",
+    "    if (tokenHits === queryTokens.length) score = Math.max(score, 40 + tokenHits * 5);",
+    "    else if (tokenHits > 0) score = Math.max(score, 20 + tokenHits * 4);",
+    "  }",
+    "  if (!score) continue;",
+    "  for (const phone of person.phones()) {",
+    "    matches.push({ name, phone: phone.value(), score });",
     "  }",
     "}",
-    "matches.sort((left, right) => right.exact - left.exact || left.name.length - right.name.length);",
+    "matches.sort((left, right) => right.score - left.score || left.name.length - right.name.length);",
     "JSON.stringify(matches.slice(0, 5));"
   ];
 
   try {
     const result = await runOsaScript(scriptLines);
     const parsed = JSON.parse(result.stdout.trim() || "[]");
-    const candidate = parsed.find((item) => /\d{8,}/.test(String(item.phone || "").replace(/[^\d]/g, "")));
-    if (!candidate) {
-      return null;
-    }
-    return {
-      displayName: candidate.name,
-      phone: candidate.phone,
-      aliases: [spokenName]
-    };
+    const matches = parsed
+      .filter((item) =>
+        /\d{8,}/.test(String(item.phone || "").replace(/[^\d]/g, ""))
+      )
+      .map((item) => ({
+        displayName: String(item.name || "").trim() || titleCase(spokenName),
+        phone: item.phone,
+        aliases: [spokenName]
+      }));
+
+    matches.sort((left, right) => {
+      const memoryDelta = contactMemoryScore(right) - contactMemoryScore(left);
+      if (memoryDelta !== 0) {
+        return memoryDelta;
+      }
+      return left.displayName.length - right.displayName.length;
+    });
+
+    return matches.length ? matches : null;
   } catch (error) {
     return {
       error:
@@ -2604,6 +5480,133 @@ async function lookupMacContact(spokenName) {
           ? "contacts_permission"
           : "lookup_failed"
     };
+  }
+}
+
+async function lookupMacContactsInSqlite(query, spokenName) {
+  const dbPaths = await addressBookDbPaths();
+  for (const dbPath of dbPaths) {
+    const matches = await queryAddressBookSqlite(dbPath, query, spokenName);
+    if (matches.length) {
+      return matches;
+    }
+  }
+  return [];
+}
+
+async function addressBookDbPaths() {
+  const dbPaths = [];
+  const primaryDb = path.join(ADDRESS_BOOK_DIR, "AddressBook-v22.abcddb");
+  dbPaths.push(primaryDb);
+
+  try {
+    const sourceEntries = await fsp.readdir(path.join(ADDRESS_BOOK_DIR, "Sources"), {
+      withFileTypes: true
+    });
+    for (const entry of sourceEntries) {
+      if (!entry.isDirectory()) {
+        continue;
+      }
+      dbPaths.push(path.join(ADDRESS_BOOK_DIR, "Sources", entry.name, "AddressBook-v22.abcddb"));
+    }
+  } catch (error) {
+    return dbPaths;
+  }
+
+  return dbPaths;
+}
+
+async function queryAddressBookSqlite(dbPath, query, spokenName) {
+  try {
+    await fsp.access(dbPath, fs.constants.R_OK);
+  } catch (error) {
+    return [];
+  }
+
+  const sql = [
+    "SELECT",
+    "  c.ZSTRINGFORINDEXING AS idx,",
+    "  p.ZFULLNUMBER AS phone",
+    "FROM ZABCDCONTACTINDEX c",
+    "JOIN ZABCDPHONENUMBER p ON p.ZOWNER = c.ZCONTACT",
+    "WHERE c.ZSTRINGFORINDEXING IS NOT NULL",
+    "  AND p.ZFULLNUMBER IS NOT NULL",
+    "LIMIT 2000;"
+  ].join(" ");
+
+  try {
+    const result = await runExecFile("sqlite3", ["-json", dbPath, sql]);
+    const rows = JSON.parse(result.stdout.trim() || "[]");
+    const queryTokens = query.split(" ").filter(Boolean);
+    const scoredMatches = [];
+    const seen = new Set();
+    for (const row of rows) {
+      const indexed = normalizeText(row.idx || "");
+      const phone = String(row.phone || "").trim();
+      if (!indexed || !hasRealPhoneNumber(phone)) {
+        continue;
+      }
+
+      const nameOnly = collapseRepeatedName(
+        indexed
+        .replace(/\b\d[\d\s+-]*\b/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+      );
+      if (!nameOnly) {
+        continue;
+      }
+
+      let score = 0;
+      if (nameOnly === query) {
+        score = 100;
+      } else if (nameOnly.startsWith(query) || query.startsWith(nameOnly)) {
+        score = 80;
+      } else if (nameOnly.includes(query) || query.includes(nameOnly)) {
+        score = 60;
+      }
+
+      if (queryTokens.length) {
+        const nameTokens = nameOnly.split(" ").filter(Boolean);
+        let tokenHits = 0;
+        for (const token of queryTokens) {
+          if (nameTokens.some((nameToken) => nameToken === token || nameToken.startsWith(token))) {
+            tokenHits += 1;
+          }
+        }
+        if (tokenHits === queryTokens.length) {
+          score = Math.max(score, 45 + tokenHits * 8);
+        } else if (tokenHits > 0) {
+          score = Math.max(score, 20 + tokenHits * 6);
+        }
+      }
+
+      if (!score) {
+        continue;
+      }
+
+      const key = `${nameOnly}|${normalizeWhatsappPhone(phone) || phone.replace(/[^\d]/g, "")}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      scoredMatches.push({
+        score,
+        displayName: titleCase(nameOnly),
+        phone,
+        aliases: [spokenName]
+      });
+    }
+
+    return scoredMatches
+      .sort(
+        (left, right) =>
+          right.score - left.score ||
+          left.displayName.length - right.displayName.length
+      )
+      .slice(0, 5);
+  } catch (error) {
+    return [];
   }
 }
 
@@ -2684,9 +5687,13 @@ async function openItem(target, options = {}) {
   if (process.platform === "darwin") {
     if (options.appName) {
       if (String(options.appName).endsWith(".app") && fs.existsSync(options.appName)) {
-        return runExecFile("open", [options.appName]);
+        return target
+          ? runExecFile("open", ["-a", options.appName, target])
+          : runExecFile("open", [options.appName]);
       }
-      return runExecFile("open", ["-a", options.appName]);
+      return target
+        ? runExecFile("open", ["-a", options.appName, target])
+        : runExecFile("open", ["-a", options.appName]);
     }
     return runExecFile("open", [target]);
   }
@@ -2705,10 +5712,16 @@ async function ensureTtsCacheDir() {
 
 async function loadKokoroModule() {
   if (!state.kokoroModulePromise) {
-    state.kokoroModulePromise = import("kokoro-js").catch((error) => {
-      state.kokoroModulePromise = null;
-      throw error;
-    });
+    state.kokoroModulePromise = Promise.resolve()
+      .then(() => require("@huggingface/transformers"))
+      .then((transformersModule) => {
+        configureTransformersEnvironment(transformersModule);
+        return require("kokoro-js");
+      })
+      .catch((error) => {
+        state.kokoroModulePromise = null;
+        throw error;
+      });
   }
 
   return state.kokoroModulePromise;
@@ -2743,7 +5756,7 @@ async function getKokoroTts() {
   return state.kokoroTtsPromise;
 }
 
-async function createKokoroSpeechAudio(text, voiceMode) {
+async function createKokoroSpeechAudio(text, voiceMode, language = "english") {
   const mode = voiceMode === "male" ? "male" : "female";
   const voice = KOKORO_TTS_VOICES[mode];
   const safeText = String(text || "").trim().slice(0, 900);
@@ -2753,10 +5766,29 @@ async function createKokoroSpeechAudio(text, voiceMode) {
 
   try {
     const tts = await getKokoroTts();
-    const audio = await tts.generate(safeText, {
-      voice: voice.id,
-      speed: mode === "female" ? 1.0 : 0.98
-    });
+    const normalizedLanguage = normalizeConversationLanguage(language) || "english";
+    let audio;
+
+    if (normalizedLanguage === "hindi" || normalizedLanguage === "telugu") {
+      const phonemes = await phonemizeIndic(safeText, normalizedLanguage);
+      if (phonemes) {
+        const encoded = tts.tokenizer(phonemes, { truncation: true });
+        audio = await tts.generate_from_ids(encoded.input_ids, {
+          voice: voice.id,
+          speed: mode === "female" ? 1.0 : 0.98
+        });
+      } else {
+        audio = await tts.generate(safeText, {
+          voice: voice.id,
+          speed: mode === "female" ? 1.0 : 0.98
+        });
+      }
+    } else {
+      audio = await tts.generate(safeText, {
+        voice: voice.id,
+        speed: mode === "female" ? 1.0 : 0.98
+      });
+    }
 
     state.kokoroStatus = "ready";
     state.kokoroLastError = "";
@@ -2775,29 +5807,192 @@ async function createKokoroSpeechAudio(text, voiceMode) {
   }
 }
 
-async function createNativeSpeechAudio(text, voiceMode) {
+function premiumVoiceLabel(voiceMode) {
+  const mode = voiceMode === "male" ? "male" : "female";
+  return `${PREMIUM_TTS_VOICES[mode]} (Gemini)`;
+}
+
+function languageInstructionForSpeech(language) {
+  const normalizedLanguage = normalizeConversationLanguage(language) || "english";
+  if (normalizedLanguage === "hindi") {
+    return "Speak naturally in Hindi with clear pronunciation and a warm assistant tone.";
+  }
+  if (normalizedLanguage === "telugu") {
+    return "Speak naturally in Telugu with clear pronunciation and a warm assistant tone.";
+  }
+  return "Speak naturally in English with clear pronunciation and a warm assistant tone.";
+}
+
+async function callPremiumGenerateContent(model, body) {
+  const apiKey = premiumApiKey();
+  if (!apiKey) {
+    throw new Error("Premium Gemini voice is not configured yet.");
+  }
+
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(apiKey)}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify(body)
+    }
+  );
+
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch (error) {
+    payload = null;
+  }
+
+  if (!response.ok) {
+    const message =
+      payload?.error?.message ||
+      payload?.reply ||
+      `Premium Gemini request failed with ${response.status}.`;
+    throw new Error(message);
+  }
+
+  return payload || {};
+}
+
+function pcmToWavBuffer(pcmBuffer, sampleRate = PREMIUM_TTS_SAMPLE_RATE, channelCount = 1) {
+  const bitsPerSample = 16;
+  const blockAlign = channelCount * (bitsPerSample / 8);
+  const byteRate = sampleRate * blockAlign;
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, 4, "ascii");
+  header.writeUInt32LE(36 + pcmBuffer.length, 4);
+  header.write("WAVE", 8, 4, "ascii");
+  header.write("fmt ", 12, 4, "ascii");
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(channelCount, 22);
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(byteRate, 28);
+  header.writeUInt16LE(blockAlign, 32);
+  header.writeUInt16LE(bitsPerSample, 34);
+  header.write("data", 36, 4, "ascii");
+  header.writeUInt32LE(pcmBuffer.length, 40);
+  return Buffer.concat([header, pcmBuffer]);
+}
+
+function geminiAudioBufferFromPayload(payload) {
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  for (const candidate of candidates) {
+    const parts = candidate?.content?.parts;
+    if (!Array.isArray(parts)) {
+      continue;
+    }
+    for (const part of parts) {
+      const mimeType = String(part?.inlineData?.mimeType || "").trim();
+      const base64Data = String(part?.inlineData?.data || "").trim();
+      if (!base64Data) {
+        continue;
+      }
+      const rawBuffer = Buffer.from(base64Data, "base64");
+      if (/^audio\/wav\b/i.test(mimeType)) {
+        return {
+          buffer: rawBuffer,
+          contentType: "audio/wav"
+        };
+      }
+      if (/^audio\/l16\b/i.test(mimeType)) {
+        const match = mimeType.match(/rate=(\d+)/i);
+        const sampleRate = match ? Number(match[1]) : PREMIUM_TTS_SAMPLE_RATE;
+        return {
+          buffer: pcmToWavBuffer(rawBuffer, sampleRate, 1),
+          contentType: "audio/wav"
+        };
+      }
+    }
+  }
+  throw new Error("Premium Gemini did not return any playable audio.");
+}
+
+async function createPremiumSpeechAudio(text, voiceMode, language = "english") {
+  const mode = voiceMode === "male" ? "male" : "female";
+  const safeText = String(text || "").trim().slice(0, 1200);
+  if (!safeText) {
+    throw new Error("No text provided for speech.");
+  }
+
+  state.premiumTtsStatus = "loading";
+  state.premiumTtsLastError = "";
+  try {
+    const payload = await callPremiumGenerateContent(PREMIUM_TTS_MODEL, {
+      contents: [
+        {
+          parts: [
+            {
+              text: `${languageInstructionForSpeech(language)} Say exactly this text: ${safeText}`
+            }
+          ]
+        }
+      ],
+      generationConfig: {
+        responseModalities: ["AUDIO"],
+        speechConfig: {
+          voiceConfig: {
+            prebuiltVoiceConfig: {
+              voiceName: PREMIUM_TTS_VOICES[mode]
+            }
+          }
+        }
+      }
+    });
+    const audio = geminiAudioBufferFromPayload(payload);
+    state.premiumTtsStatus = "ready";
+    state.premiumTtsLastError = "";
+    return {
+      buffer: audio.buffer,
+      contentType: audio.contentType,
+      voiceName: premiumVoiceLabel(mode)
+    };
+  } catch (error) {
+    state.premiumTtsStatus = "error";
+    state.premiumTtsLastError = error.message;
+    throw error;
+  }
+}
+
+async function createNativeSpeechAudio(text, voiceMode, language = "english") {
   if (process.platform !== "darwin") {
     throw new Error("Native macOS speech is not available on this platform.");
   }
 
   const mode = voiceMode === "male" ? "male" : "female";
-  const voiceName = NATIVE_TTS_VOICES[mode][0];
+  const normalizedLanguage = normalizeConversationLanguage(language) || "english";
+  const voiceName = nativeVoiceNameForLanguage(normalizedLanguage, mode);
   const safeText = String(text || "").trim().slice(0, 1200);
   if (!safeText) {
     throw new Error("No text provided for speech.");
+  }
+  if (!voiceName) {
+    throw new Error(`No native ${normalizedLanguage} voice is configured on this Mac.`);
   }
 
   await ensureTtsCacheDir();
   const token = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const aiffPath = path.join(TTS_CACHE_DIR, `${token}.aiff`);
   const m4aPath = path.join(TTS_CACHE_DIR, `${token}.m4a`);
+  const rate =
+    normalizedLanguage === "hindi"
+      ? "172"
+      : normalizedLanguage === "telugu"
+        ? "170"
+        : mode === "female"
+          ? "182"
+          : "176";
 
   try {
     await runExecFile("/usr/bin/say", [
       "-v",
       voiceName,
       "-r",
-      mode === "female" ? "182" : "176",
+      rate,
       "-o",
       aiffPath,
       safeText
@@ -2822,8 +6017,39 @@ async function createNativeSpeechAudio(text, voiceMode) {
   }
 }
 
-async function createSpeechAudio(text, voiceMode) {
-  return createKokoroSpeechAudio(text, voiceMode);
+async function createSpeechAudio(text, voiceMode, language = "english") {
+  const cachedAudio = readTtsCache(text, voiceMode, language);
+  if (cachedAudio) {
+    return cachedAudio;
+  }
+
+  const providers = ttsProviderCandidatesForLanguage(language);
+  const errors = [];
+  for (const provider of providers) {
+    try {
+      let audio = null;
+      if (provider === "gemini_tts") {
+        audio = await createPremiumSpeechAudio(text, voiceMode, language);
+      }
+
+      if (provider === "kokoro_server") {
+        audio = await createKokoroSpeechAudio(text, voiceMode, language);
+      }
+
+      if (audio) {
+        writeTtsCache(text, voiceMode, language, audio);
+        return audio;
+      }
+    } catch (error) {
+      errors.push(`${provider}: ${error.message}`);
+    }
+  }
+
+  if (errors.length) {
+    throw new Error(errors.join(" | "));
+  }
+
+  throw new Error(`No server-side voice is available for ${language}.`);
 }
 
 function enqueueSpeechJob(job) {
@@ -2839,6 +6065,8 @@ async function warmKokoroVoices() {
   try {
     await createKokoroSpeechAudio("Ready.", "female");
     await createKokoroSpeechAudio("Ready.", "male");
+    await createKokoroSpeechAudio("नमस्ते", "female", "hindi");
+    await createKokoroSpeechAudio("నమస్తే", "female", "telugu");
   } catch (error) {
     state.kokoroLastError = error.message;
     state.kokoroStatus = "error";
@@ -2866,14 +6094,497 @@ function kickoffKokoroWarmup() {
   return state.kokoroWarmupPromise;
 }
 
+function enqueueTranscriptionJob(job) {
+  const nextJob = state.transcriptionQueue
+    .catch(() => {})
+    .then(job);
+
+  state.transcriptionQueue = nextJob.catch(() => {});
+  return nextJob;
+}
+
+function bundledTransformersCacheDir() {
+  return PACKAGED_TRANSFORMERS_CACHE_DIR && fs.existsSync(PACKAGED_TRANSFORMERS_CACHE_DIR)
+    ? PACKAGED_TRANSFORMERS_CACHE_DIR
+    : "";
+}
+
+function configureTransformersEnvironment(transformersModule) {
+  const env = transformersModule?.env;
+  const cacheDir = bundledTransformersCacheDir();
+  if (!env || !cacheDir) {
+    return transformersModule;
+  }
+
+  const normalizedCacheDir = cacheDir.endsWith(path.sep) ? cacheDir : `${cacheDir}${path.sep}`;
+  env.allowLocalModels = true;
+  env.allowRemoteModels = false;
+  env.useFS = true;
+  env.useFSCache = true;
+  env.cacheDir = normalizedCacheDir;
+  env.localModelPath = normalizedCacheDir;
+  return transformersModule;
+}
+
+function asrLanguageName(language) {
+  const normalized = normalizeConversationLanguage(language) || "auto";
+  if (normalized === "english") {
+    return "english";
+  }
+  if (normalized === "hindi") {
+    return "hindi";
+  }
+  if (normalized === "telugu") {
+    return "telugu";
+  }
+  return "";
+}
+
+function asrModelIdForLanguage(language) {
+  const normalized = normalizeConversationLanguage(language) || "auto";
+  return normalized === "english" ? ASR_MODEL_IDS.english : ASR_MODEL_IDS.multilingual;
+}
+
+function asrModelUsesEnglishOnlyVocabulary(modelId) {
+  return /\.en$/i.test(String(modelId || ""));
+}
+
+function loadAsrModule() {
+  if (!state.asrModulePromise) {
+    state.asrModulePromise = Promise.resolve()
+      .then(() => require("@huggingface/transformers"))
+      .then((transformersModule) => configureTransformersEnvironment(transformersModule))
+      .catch((error) => {
+        state.asrModulePromise = null;
+        throw error;
+      });
+  }
+
+  return state.asrModulePromise;
+}
+
+async function getSpeechRecognitionPipeline(language = "auto") {
+  if (!localSpeechRecognitionEnabled()) {
+    state.asrStatus = "disabled";
+    state.asrLastError = "Local speech recognition is disabled on this host.";
+    throw new Error(state.asrLastError);
+  }
+
+  const modelId = asrModelIdForLanguage(language);
+  if (!state.asrPipelinePromises[modelId]) {
+    state.asrStatus = "loading";
+    state.asrLastError = "";
+    state.asrPipelinePromises[modelId] = (async () => {
+      const { pipeline } = await loadAsrModule();
+      const transcriber = await pipeline("automatic-speech-recognition", modelId, {
+        dtype: "q8"
+      });
+      state.asrStatus = "ready";
+      state.asrLastError = "";
+      return transcriber;
+    })().catch((error) => {
+      state.asrStatus = "error";
+      state.asrLastError = error.message;
+      delete state.asrPipelinePromises[modelId];
+      throw error;
+    });
+  }
+
+  return state.asrPipelinePromises[modelId];
+}
+
+function kickoffSpeechRecognitionWarmup() {
+  if (!localSpeechRecognitionEnabled()) {
+    state.asrStatus = "disabled";
+    state.asrLastError = "Local speech recognition is disabled on this host.";
+    return Promise.resolve(null);
+  }
+
+  const warmups = [
+    getSpeechRecognitionPipeline("english").catch(() => null),
+    getSpeechRecognitionPipeline("auto").catch(() => null)
+  ];
+
+  return Promise.all(warmups);
+}
+
+function decodeWavAudio(buffer) {
+  if (!Buffer.isBuffer(buffer) || buffer.length < 44) {
+    throw new Error("The recording is empty or unreadable.");
+  }
+
+  if (buffer.toString("ascii", 0, 4) !== "RIFF" || buffer.toString("ascii", 8, 12) !== "WAVE") {
+    throw new Error("Jarvis expected WAV audio from the microphone.");
+  }
+
+  let offset = 12;
+  let audioFormat = 0;
+  let channelCount = 0;
+  let sampleRate = 0;
+  let bitsPerSample = 0;
+  let dataOffset = 0;
+  let dataLength = 0;
+
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString("ascii", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const chunkStart = offset + 8;
+
+    if (chunkId === "fmt ") {
+      audioFormat = buffer.readUInt16LE(chunkStart);
+      channelCount = buffer.readUInt16LE(chunkStart + 2);
+      sampleRate = buffer.readUInt32LE(chunkStart + 4);
+      bitsPerSample = buffer.readUInt16LE(chunkStart + 14);
+    } else if (chunkId === "data") {
+      dataOffset = chunkStart;
+      dataLength = chunkSize;
+      break;
+    }
+
+    offset = chunkStart + chunkSize + (chunkSize % 2);
+  }
+
+  if (!dataOffset || !dataLength || !sampleRate || !channelCount) {
+    throw new Error("Jarvis could not read that microphone recording.");
+  }
+
+  const bytesPerSample = bitsPerSample / 8;
+  const frameCount = Math.floor(dataLength / Math.max(bytesPerSample * channelCount, 1));
+  const monoSamples = new Float32Array(frameCount);
+
+  for (let frameIndex = 0; frameIndex < frameCount; frameIndex += 1) {
+    let mixedSample = 0;
+
+    for (let channelIndex = 0; channelIndex < channelCount; channelIndex += 1) {
+      const sampleOffset = dataOffset + (frameIndex * channelCount + channelIndex) * bytesPerSample;
+      let sample = 0;
+
+      if (audioFormat === 1 && bitsPerSample === 16) {
+        sample = buffer.readInt16LE(sampleOffset) / 32768;
+      } else if (audioFormat === 3 && bitsPerSample === 32) {
+        sample = buffer.readFloatLE(sampleOffset);
+      } else {
+        throw new Error("Jarvis only supports 16-bit PCM microphone audio right now.");
+      }
+
+      mixedSample += sample;
+    }
+
+    monoSamples[frameIndex] = mixedSample / channelCount;
+  }
+
+  return {
+    sampleRate,
+    samples: monoSamples
+  };
+}
+
+function resampleAudio(samples, inputRate, targetRate) {
+  if (!samples?.length || !inputRate || inputRate === targetRate) {
+    return samples;
+  }
+
+  const outputLength = Math.max(1, Math.round((samples.length * targetRate) / inputRate));
+  const output = new Float32Array(outputLength);
+  const ratio = inputRate / targetRate;
+
+  for (let index = 0; index < outputLength; index += 1) {
+    const position = index * ratio;
+    const leftIndex = Math.floor(position);
+    const rightIndex = Math.min(leftIndex + 1, samples.length - 1);
+    const weight = position - leftIndex;
+    output[index] = samples[leftIndex] * (1 - weight) + samples[rightIndex] * weight;
+  }
+
+  return output;
+}
+
+function normalizeAudioLevels(samples) {
+  if (!samples?.length) {
+    return samples;
+  }
+
+  let peak = 0;
+  let energy = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const sample = samples[index];
+    const magnitude = Math.abs(sample);
+    if (magnitude > peak) {
+      peak = magnitude;
+    }
+    energy += sample * sample;
+  }
+
+  if (!peak) {
+    return samples;
+  }
+
+  const rms = Math.sqrt(energy / samples.length);
+  const peakGain = ASR_TARGET_PEAK / peak;
+  const rmsGain = rms > 0 ? ASR_TARGET_RMS / rms : ASR_MAX_GAIN;
+  const gain = Math.max(1, Math.min(ASR_MAX_GAIN, peakGain, rmsGain));
+  if (Math.abs(gain - 1) < 0.05) {
+    return samples;
+  }
+
+  const boosted = new Float32Array(samples.length);
+  for (let index = 0; index < samples.length; index += 1) {
+    boosted[index] = Math.max(-1, Math.min(1, samples[index] * gain));
+  }
+  return boosted;
+}
+
+function trimAudioSilence(samples, sampleRate) {
+  if (!samples?.length || !sampleRate) {
+    return samples;
+  }
+
+  let peak = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    const magnitude = Math.abs(samples[index]);
+    if (magnitude > peak) {
+      peak = magnitude;
+    }
+  }
+
+  if (!peak) {
+    return samples;
+  }
+
+  const threshold = Math.max(
+    ASR_MIN_TRIM_THRESHOLD,
+    Math.min(ASR_MAX_TRIM_THRESHOLD, peak * 0.08)
+  );
+
+  let start = 0;
+  while (start < samples.length && Math.abs(samples[start]) < threshold) {
+    start += 1;
+  }
+
+  let end = samples.length - 1;
+  while (end > start && Math.abs(samples[end]) < threshold) {
+    end -= 1;
+  }
+
+  if (start === 0 && end === samples.length - 1) {
+    return samples;
+  }
+
+  const padding = Math.round((sampleRate * ASR_TRIM_PADDING_MS) / 1000);
+  const trimmedStart = Math.max(0, start - padding);
+  const trimmedEnd = Math.min(samples.length, end + padding + 1);
+  return samples.slice(trimmedStart, trimmedEnd);
+}
+
+function cleanTranscriptText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
+}
+
+function transcriptLooksUsable(text) {
+  return cleanTranscriptText(text).replace(/[^\p{L}\p{M}\p{N}]/gu, "").length >= 2;
+}
+
+function buildAsrAttempts(language) {
+  const normalized = normalizeConversationLanguage(language) || "auto";
+  if (normalized === "english") {
+    return [
+      { language: "english" },
+      { language: "auto" }
+    ];
+  }
+  if (normalized === "hindi") {
+    return [
+      { language: "hindi" },
+      { language: "auto" }
+    ];
+  }
+  if (normalized === "telugu") {
+    return [
+      { language: "telugu" },
+      { language: "auto" }
+    ];
+  }
+  return [{ language: "auto" }];
+}
+
+async function transcribePreparedAudio(preparedAudio, language) {
+  const modelId = asrModelIdForLanguage(language);
+  const transcriber = await getSpeechRecognitionPipeline(language);
+  const options = {
+    chunk_length_s: ASR_CHUNK_LENGTH_S,
+    stride_length_s: ASR_STRIDE_LENGTH_S
+  };
+  const preferredLanguage = asrLanguageName(language);
+  if (asrModelUsesEnglishOnlyVocabulary(modelId)) {
+    const output = await transcriber(preparedAudio, options);
+    return cleanTranscriptText(output?.text || "");
+  }
+
+  options.task = "transcribe";
+  if (preferredLanguage) {
+    options.language = preferredLanguage;
+  }
+  const output = await transcriber(preparedAudio, options);
+  return cleanTranscriptText(output?.text || "");
+}
+
+function transcriptionInstruction(language) {
+  const normalized = normalizeConversationLanguage(language) || "auto";
+  if (normalized === "hindi") {
+    return "Transcribe this short voice command exactly. Return only the Hindi transcript in Devanagari. Do not translate or explain.";
+  }
+  if (normalized === "telugu") {
+    return "Transcribe this short voice command exactly. Return only the Telugu transcript in Telugu script. Do not translate or explain.";
+  }
+  if (normalized === "english") {
+    return "Transcribe this short voice command exactly. Return only the English transcript. Do not translate or explain.";
+  }
+  return "Transcribe this short voice command exactly. Return only the spoken words in the original language and script. Do not translate or explain.";
+}
+
+function extractPremiumTranscript(payload) {
+  const candidates = Array.isArray(payload?.candidates) ? payload.candidates : [];
+  for (const candidate of candidates) {
+    const parts = candidate?.content?.parts;
+    if (!Array.isArray(parts)) {
+      continue;
+    }
+    for (const part of parts) {
+      const text = cleanTranscriptText(part?.text || "");
+      if (text) {
+        return text.replace(/^["'`]+|["'`]+$/g, "").trim();
+      }
+    }
+  }
+  return "";
+}
+
+async function transcribeWithPremiumAudio(buffer, language) {
+  if (!premiumAsrEnabled()) {
+    throw new Error("Premium Gemini transcription is not configured yet.");
+  }
+
+  state.premiumAsrStatus = "loading";
+  state.premiumAsrLastError = "";
+  try {
+    const payload = await callPremiumGenerateContent(PREMIUM_ASR_MODEL, {
+      contents: [
+        {
+          parts: [
+            {
+              text: transcriptionInstruction(language)
+            },
+            {
+              inlineData: {
+                mimeType: "audio/wav",
+                data: buffer.toString("base64")
+              }
+            }
+          ]
+        }
+      ],
+      generationConfig: {
+        temperature: 0,
+        responseMimeType: "text/plain"
+      }
+    });
+    const transcript = extractPremiumTranscript(payload);
+    state.premiumAsrStatus = "ready";
+    state.premiumAsrLastError = "";
+    return transcript;
+  } catch (error) {
+    state.premiumAsrStatus = "error";
+    state.premiumAsrLastError = error.message;
+    throw error;
+  }
+}
+
+async function transcribeAudioBuffer(buffer, language) {
+  const normalizedLanguage = normalizeConversationLanguage(language) || "auto";
+  const { samples, sampleRate } = decodeWavAudio(buffer);
+  const maxInputSamples = Math.max(sampleRate * ASR_MAX_INPUT_SECONDS, ASR_SAMPLE_RATE * ASR_MAX_INPUT_SECONDS);
+  const clipped = samples.length > maxInputSamples ? samples.slice(0, maxInputSamples) : samples;
+  const preparedAudio = normalizeAudioLevels(
+    trimAudioSilence(resampleAudio(clipped, sampleRate, ASR_SAMPLE_RATE), ASR_SAMPLE_RATE)
+  );
+
+  const preferredProvider = speechRecognitionProviderForLanguage(language);
+  if (preferredProvider === "gemini_asr") {
+    try {
+      const premiumTranscript = await transcribeWithPremiumAudio(buffer, language);
+      if (transcriptLooksUsable(premiumTranscript)) {
+        return premiumTranscript;
+      }
+    } catch (error) {
+      // Fall back to local Whisper below if premium transcription fails.
+    }
+  }
+
+  let fallbackTranscript = "";
+  for (const attempt of buildAsrAttempts(language)) {
+    const transcript = await transcribePreparedAudio(preparedAudio, attempt.language);
+    if (transcriptLooksUsable(transcript)) {
+      return transcript;
+    }
+    if (!fallbackTranscript && transcript) {
+      fallbackTranscript = transcript;
+    }
+  }
+
+  if (
+    premiumAsrEnabled() &&
+    (normalizedLanguage === "auto" ||
+      normalizedLanguage === "hindi" ||
+      normalizedLanguage === "telugu")
+  ) {
+    try {
+      const premiumTranscript = await transcribeWithPremiumAudio(buffer, language);
+      if (transcriptLooksUsable(premiumTranscript)) {
+        return premiumTranscript;
+      }
+      if (!fallbackTranscript && premiumTranscript) {
+        fallbackTranscript = premiumTranscript;
+      }
+    } catch (error) {
+      // Keep the local fallback transcript below.
+    }
+  }
+
+  return fallbackTranscript;
+}
+
+function normalizeWhatsappPhone(phone) {
+  if (!hasRealPhoneNumber(phone)) {
+    return "";
+  }
+
+  let digits = String(phone || "").replace(/[^\d]/g, "");
+  if (digits.startsWith("00")) {
+    digits = digits.slice(2);
+  }
+
+  // Most local contacts on this machine are saved as 10-digit Indian mobile numbers.
+  if (digits.length === 10) {
+    digits = `91${digits}`;
+  } else if (digits.length === 11 && digits.startsWith("0")) {
+    digits = `91${digits.slice(1)}`;
+  }
+
+  return digits;
+}
+
 function whatsappUrl(phone, message) {
-  const cleanedPhone = String(phone || "").replace(/[^\d]/g, "");
+  const cleanedPhone = normalizeWhatsappPhone(phone);
   return `whatsapp://send?phone=${cleanedPhone}&text=${encodeURIComponent(message)}`;
 }
 
 function whatsappFallbackUrl(phone, message) {
-  const cleanedPhone = String(phone || "").replace(/[^\d]/g, "");
+  const cleanedPhone = normalizeWhatsappPhone(phone);
   return `https://wa.me/${cleanedPhone}?text=${encodeURIComponent(message)}`;
+}
+
+function whatsappAppName(config) {
+  return config.apps?.whatsapp || DEFAULT_CONFIG.apps.whatsapp;
 }
 
 function spotifyAppName(config) {
@@ -3271,6 +6982,13 @@ async function executeSpotifyControl(action, config) {
 }
 
 async function executeIntent(intent, config) {
+  if (isCloudMode()) {
+    const cloudResult = executeCloudIntent(intent, config);
+    if (cloudResult) {
+      return cloudResult;
+    }
+  }
+
   switch (intent.type) {
     case "openApp": {
       await openItem(null, { appName: intent.appName });
@@ -3361,6 +7079,151 @@ async function executeIntent(intent, config) {
         status: "completed"
       });
     }
+    case "setConversationLanguage": {
+      rememberSessionContext({
+        lastIntentType: "setConversationLanguage",
+        preferredLanguage: intent.language
+      });
+      return createReply(
+        localizedResponse(
+          "languageSet",
+          {
+            label: conversationLanguageLabel(intent.language)
+          },
+          intent.language
+        ),
+        {
+          conversationLanguage: normalizeConversationLanguage(intent.language) || "auto",
+          preferredConversationLanguage:
+            normalizeConversationLanguage(intent.language) || "auto",
+          status: "completed"
+        }
+      );
+    }
+    case "setVoiceMode": {
+      rememberSessionContext({
+        lastIntentType: "setVoiceMode",
+        lastVoiceMode: intent.voiceMode
+      });
+      return createReply(
+        intent.voiceMode === "male"
+          ? `Okay. I will use my male voice.`
+          : `Okay. I will use my female voice.`,
+        {
+          voiceMode: intent.voiceMode === "male" ? "male" : "female",
+          status: "completed"
+        }
+      );
+    }
+    case "showScheduledMessages": {
+      rememberSessionContext({
+        lastIntentType: "showScheduledMessages"
+      });
+      return createReply(scheduledMessagesSummary(preferredConversationLanguage()), {
+        conversationLanguage: preferredConversationLanguage()
+      });
+    }
+    case "cancelScheduledMessage": {
+      const target = resolveScheduledMessageSelection(intent.selectorText);
+      if (!target) {
+        return createReply(
+          `I couldn't find that scheduled message. Say "show scheduled messages" first, then say something like "cancel scheduled message 2".`
+        );
+      }
+
+      await cancelScheduledMessage(target);
+      rememberSessionContext({
+        lastIntentType: "cancelScheduledMessage",
+        lastContact: cloneContactForContext(target.contact)
+      });
+      const language = target.conversationLanguage || preferredConversationLanguage();
+      return createReply(
+        `Cancelled scheduled message ${describeScheduledMessage(target, 0, language).replace(/^1\.\s*/, "")}.`,
+        {
+          conversationLanguage: language,
+          status: "cancelled"
+        }
+      );
+    }
+    case "rescheduleScheduledMessage": {
+      const target = resolveScheduledMessageSelection(intent.selectorText);
+      if (!target) {
+        return createReply(
+          `I couldn't find that scheduled message. Say "show scheduled messages" first, then say something like "reschedule scheduled message 2 to tomorrow at 6 pm".`
+        );
+      }
+
+      const updated = await updateScheduledMessage(target, {
+        sendAt: intent.sendAt
+      });
+      const language = updated?.conversationLanguage || preferredConversationLanguage();
+      rememberSessionContext({
+        lastIntentType: "rescheduleScheduledMessage",
+        lastContact: cloneContactForContext(updated?.contact || target.contact)
+      });
+      return createReply(
+        `Rescheduled it for ${formatScheduledDateTime(updated.sendAt, language)}.`,
+        {
+          conversationLanguage: language,
+          status: "scheduled"
+        }
+      );
+    }
+    case "editScheduledMessage": {
+      const target = resolveScheduledMessageSelection(intent.selectorText);
+      if (!target) {
+        return createReply(
+          `I couldn't find that scheduled message. Say "show scheduled messages" first, then say something like "change scheduled message 2 saying I will be late".`
+        );
+      }
+
+      const updated = await updateScheduledMessage(target, {
+        message: intent.message
+      });
+      const language = updated?.conversationLanguage || preferredConversationLanguage();
+      rememberSessionContext({
+        lastIntentType: "editScheduledMessage",
+        lastContact: cloneContactForContext(updated?.contact || target.contact),
+        lastWhatsappMessage: updated?.message || intent.message
+      });
+      return createReply(
+        `Updated the scheduled message to "${updated.message}".`,
+        {
+          conversationLanguage: language,
+          status: "scheduled"
+        }
+      );
+    }
+    case "scheduleWhatsapp": {
+      if (isCloudMode()) {
+        return createReply(
+          `Scheduled WhatsApp delivery needs the desktop app running on the laptop that will send it.`
+        );
+      }
+
+      const language = intent.conversationLanguage || effectiveConversationLanguage(intent.message);
+      const record = await saveScheduledWhatsapp(
+        intent.contact,
+        intent.message,
+        intent.sendAt,
+        language
+      );
+      rememberSessionContext({
+        lastIntentType: "scheduleWhatsapp",
+        lastContact: cloneContactForContext(intent.contact),
+        lastWhatsappMessage: intent.message
+      });
+      return createReply(
+        localizedResponse("scheduledWhatsappSaved", {
+          contact: contactLabel(intent.contact),
+          when: formatScheduledDateTime(record.sendAt, language)
+        }, language),
+        {
+          conversationLanguage: language,
+          status: "scheduled"
+        }
+      );
+    }
     case "shortcut": {
       if (process.platform !== "darwin") {
         return createReply(
@@ -3383,22 +7246,43 @@ async function executeIntent(intent, config) {
       }
     }
     case "whatsapp": {
+      const language = effectiveConversationLanguage(
+        `${contactLabel(intent.contact)} ${intent.message}`
+      );
       const resolvedContact = await resolveWhatsappContact(intent.contact);
       if (resolvedContact.error === "contacts_permission") {
         return createReply(
-          `I need macOS Contacts permission to automatically find ${contactLabel(intent.contact)}. Allow Contacts access, or save that contact with a phone number.`
+          localizedResponse("contactsPermissionResolve", {
+            contact: contactLabel(intent.contact)
+          }, language),
+          {
+            conversationLanguage: language,
+            status: "failed"
+          }
         );
       }
 
       if (resolvedContact.error === "lookup_failed") {
         return createReply(
-          `I couldn't look up ${contactLabel(intent.contact)} in Contacts right now. Try again, or save the number directly in config/assistant.config.json.`
+          localizedResponse("contactsLookupResolveFailed", {
+            contact: contactLabel(intent.contact)
+          }, language),
+          {
+            conversationLanguage: language,
+            status: "failed"
+          }
         );
       }
 
       if (resolvedContact.error || !resolvedContact.contact) {
         return createReply(
-          `I couldn't find a real phone number for ${contactLabel(intent.contact)} automatically. Save the contact in Contacts with a mobile number, or add the phone number in config/assistant.config.json.`
+          localizedResponse("contactsPhoneMissing", {
+            contact: contactLabel(intent.contact)
+          }, language),
+          {
+            conversationLanguage: language,
+            status: "failed"
+          }
         );
       }
 
@@ -3411,22 +7295,33 @@ async function executeIntent(intent, config) {
 
       const primaryUrl = whatsappUrl(contact.phone || "", intent.message);
       try {
-        await openItem(primaryUrl);
+        await openItem(primaryUrl, {
+          appName: whatsappAppName(config)
+        });
       } catch (error) {
         await openItem(whatsappFallbackUrl(contact.phone || "", intent.message));
       }
 
       if (config.messageDelivery !== "autoSend") {
         return createReply(
-          `WhatsApp is open with the message drafted for ${
-            contact.displayName || titleCase(contact.key)
-          }.`
+          localizedResponse("whatsappDraftReady", {
+            contact: contact.displayName || titleCase(contact.key)
+          }, language),
+          {
+            conversationLanguage: language,
+            status: "drafted"
+          }
         );
       }
 
       if (process.platform !== "darwin") {
         return createReply(
           `The message draft is ready. Auto-send is only scripted for macOS right now.`
+          ,
+          {
+            conversationLanguage: language,
+            status: "drafted"
+          }
         );
       }
 
@@ -3441,36 +7336,73 @@ async function executeIntent(intent, config) {
       try {
         await runExec(`osascript ${script}`);
         return createReply(
-          `Message sent to ${
-            contact.displayName || titleCase(contact.key)
-          }.`,
-          { status: "completed" }
+          localizedResponse("whatsappSent", {
+            contact: contact.displayName || titleCase(contact.key)
+          }, language),
+          {
+            conversationLanguage: language,
+            status: "completed"
+          }
         );
       } catch (error) {
         return createReply(
-          `I opened the WhatsApp draft, but auto-send needs macOS Accessibility and Automation permissions to work cleanly.`
+          localizedResponse("whatsappAutoSendPermission", {}, language),
+          {
+            conversationLanguage: language,
+            status: "drafted"
+          }
         );
       }
     }
     case "whatsappLookup": {
-      const foundContact = await lookupMacContact(intent.spokenName);
-      if (!foundContact) {
+      const foundContacts = await lookupMacContacts(intent.spokenName);
+      if (!foundContacts || (Array.isArray(foundContacts) && !foundContacts.length)) {
         return createReply(
-          `I couldn't find "${intent.spokenName}" in your configured contacts or Mac Contacts. Add the contact in Contacts or in config/assistant.config.json first.`
+          localizedResponse("contactsNotFound", {
+            spokenName: intent.spokenName
+          }, effectiveConversationLanguage(intent.spokenName)),
+          {
+            conversationLanguage: effectiveConversationLanguage(intent.spokenName)
+          }
         );
       }
 
-      if (foundContact.error === "contacts_permission") {
+      if (foundContacts.error === "contacts_permission") {
         return createReply(
-          `I need macOS Contacts permission to find "${intent.spokenName}". Allow Contacts access for this app or add the contact in config/assistant.config.json.`
+          localizedResponse("contactsPermissionFind", {
+            spokenName: intent.spokenName
+          }, effectiveConversationLanguage(intent.spokenName)),
+          {
+            conversationLanguage: effectiveConversationLanguage(intent.spokenName)
+          }
         );
       }
 
-      if (foundContact.error) {
+      if (foundContacts.error) {
         return createReply(
-          `I couldn't look up "${intent.spokenName}" in Mac Contacts right now. Add the contact in config/assistant.config.json if you want a guaranteed match.`
+          localizedResponse("contactsLookupFailed", {
+            spokenName: intent.spokenName
+          }, effectiveConversationLanguage(intent.spokenName)),
+          {
+            conversationLanguage: effectiveConversationLanguage(intent.spokenName)
+          }
         );
       }
+
+      if (foundContacts.length > 1) {
+        return rememberPending(
+          {
+            type: "whatsappContactChoice",
+            conversationLanguage: effectiveConversationLanguage(intent.spokenName),
+            spokenName: intent.spokenName,
+            message: intent.message,
+            contacts: foundContacts
+          },
+          whatsappChoicePrompt(intent.spokenName, foundContacts)
+        );
+      }
+
+      const foundContact = foundContacts[0];
 
       return executeIntent(
         {
@@ -3486,12 +7418,96 @@ async function executeIntent(intent, config) {
   }
 }
 
-async function processCommand(rawText) {
+async function processCommand(rawText, metadata = {}) {
   clearExpiredPending();
   const config = readConfig();
+  const language = effectiveConversationLanguage(rawText);
+
+  if (state.pendingAction?.type === "whatsappContactChoice") {
+    if (isNegative(rawText)) {
+      state.pendingAction = null;
+      return createReply(localizedResponse("cancelled", {}, language), {
+        conversationLanguage: language,
+        status: "cancelled"
+      });
+    }
+
+    const chosenContact = resolveContactChoiceFromReply(
+      rawText,
+      state.pendingAction.contacts || []
+    );
+    if (!chosenContact) {
+      return createReply(
+        whatsappChoicePrompt(
+          state.pendingAction.spokenName,
+          state.pendingAction.contacts || []
+        )
+      );
+    }
+
+    const pending = state.pendingAction;
+    state.pendingAction = null;
+    return rememberPending(
+      {
+        type: "whatsapp",
+        conversationLanguage: pending.conversationLanguage || language,
+        contact: chosenContact,
+        message: pending.message
+      },
+      readyWhatsappPrompt(
+        chosenContact,
+        pending.message,
+        config.messageDelivery,
+        pending.conversationLanguage || language
+      )
+    );
+  }
+
+  if (state.pendingAction?.type === "scheduleWhatsappContactChoice") {
+    if (isNegative(rawText)) {
+      state.pendingAction = null;
+      return createReply(localizedResponse("cancelled", {}, language), {
+        conversationLanguage: language,
+        status: "cancelled"
+      });
+    }
+
+    const chosenContact = resolveContactChoiceFromReply(
+      rawText,
+      state.pendingAction.contacts || []
+    );
+    if (!chosenContact) {
+      return createReply(
+        whatsappChoicePrompt(
+          state.pendingAction.spokenName,
+          state.pendingAction.contacts || []
+        )
+      );
+    }
+
+    const pending = state.pendingAction;
+    state.pendingAction = null;
+    return rememberPending(
+      {
+        type: "scheduleWhatsapp",
+        conversationLanguage: pending.conversationLanguage || language,
+        contact: chosenContact,
+        message: pending.message,
+        sendAt: pending.sendAt
+      },
+      readyScheduledWhatsappPrompt(
+        chosenContact,
+        pending.message,
+        pending.sendAt,
+        pending.conversationLanguage || language
+      )
+    );
+  }
 
   if (!state.pendingAction && (isAffirmative(rawText) || isNegative(rawText))) {
-    return createReply(`There isn't a pending action right now. Ask me something or give me a command.`);
+    return createReply(localizedResponse("noPendingAction", {}, language), {
+      conversationLanguage: language
+    });
   }
 
   if (state.pendingAction) {
@@ -3502,15 +7518,22 @@ async function processCommand(rawText) {
     }
     if (isNegative(rawText)) {
       state.pendingAction = null;
-      return createReply(`Cancelled.`, {
+      return createReply(localizedResponse("cancelled", {}, language), {
+        conversationLanguage: language,
         status: "cancelled"
       });
     }
   }
 
-  const intent = handleIntent(rawText, config);
+  const intent = handleIntent(rawText, config, metadata);
   if (!intent) {
     const cleanText = stripWakeWords(rawText, config.assistantName);
+    const looksLikeDeviceControl = looksLikeDeviceControlRequest(cleanText);
+
+    if (!looksLikeDeviceControl && config.knowledge?.enabled !== false) {
+      return callGeminiKnowledge(cleanText, config);
+    }
+
     const planned = await callGeminiPlanner(cleanText, config);
 
     if (planned?.mode === "action" && Array.isArray(planned.steps) && planned.steps.length) {
@@ -3534,7 +7557,7 @@ async function processCommand(rawText) {
     }
 
     if (planned?.mode === "unsupported") {
-      if (!looksLikeDeviceControlRequest(cleanText) && config.knowledge?.enabled !== false) {
+      if (!looksLikeDeviceControl && config.knowledge?.enabled !== false) {
         return callGeminiKnowledge(cleanText, config);
       }
       const plannerReply = String(planned.response || "").trim();
@@ -3553,10 +7576,214 @@ async function processCommand(rawText) {
     return createReply(`I don't know that command yet. Say help for examples.`);
   }
 
+  if (intent.type === "whatsappLookup") {
+    if (isCloudMode()) {
+      const phone = normalizeWhatsappPhone(intent.spokenName || "");
+      if (phone) {
+        const hostedContact = {
+          displayName: intent.spokenName,
+          phone,
+          aliases: [intent.spokenName]
+        };
+        return rememberPending(
+          {
+            type: "whatsapp",
+            conversationLanguage: language,
+            contact: hostedContact,
+            message: intent.message
+          },
+          readyWhatsappPrompt(
+            hostedContact,
+            intent.message,
+            "draft",
+            language
+          )
+        );
+      }
+
+      return createReply(
+        `In the hosted version, WhatsApp works with saved contacts in config or direct phone numbers. Add ${intent.spokenName} to config/assistant.config.json, or say the number directly.`,
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    const foundContacts = await lookupMacContacts(intent.spokenName);
+    if (!foundContacts || (Array.isArray(foundContacts) && !foundContacts.length)) {
+      return createReply(
+        localizedResponse("contactsNotFound", {
+          spokenName: intent.spokenName
+        }, language),
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    if (foundContacts.error === "contacts_permission") {
+      return createReply(
+        localizedResponse("contactsPermissionFind", {
+          spokenName: intent.spokenName
+        }, language),
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    if (foundContacts.error) {
+      return createReply(
+        localizedResponse("contactsLookupFailed", {
+          spokenName: intent.spokenName
+        }, language),
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    if (foundContacts.length > 1) {
+      return rememberPending(
+        {
+          type: "whatsappContactChoice",
+          conversationLanguage: language,
+          spokenName: intent.spokenName,
+          message: intent.message,
+          contacts: foundContacts
+        },
+        whatsappChoicePrompt(intent.spokenName, foundContacts)
+      );
+    }
+
+    return rememberPending(
+      {
+        type: "whatsapp",
+        conversationLanguage: language,
+        contact: foundContacts[0],
+        message: intent.message
+      },
+      readyWhatsappPrompt(
+        foundContacts[0],
+        intent.message,
+        config.messageDelivery,
+        language
+      )
+    );
+  }
+
+  if (intent.type === "scheduleWhatsappLookup") {
+    if (isCloudMode()) {
+      return createReply(
+        `Scheduled WhatsApp delivery needs the desktop app running on the laptop that will send it.`,
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    const foundContacts = await lookupMacContacts(intent.spokenName);
+    if (!foundContacts || (Array.isArray(foundContacts) && !foundContacts.length)) {
+      return createReply(
+        localizedResponse("contactsNotFound", {
+          spokenName: intent.spokenName
+        }, language),
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    if (foundContacts.error === "contacts_permission") {
+      return createReply(
+        localizedResponse("contactsPermissionFind", {
+          spokenName: intent.spokenName
+        }, language),
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    if (foundContacts.error) {
+      return createReply(
+        localizedResponse("contactsLookupFailed", {
+          spokenName: intent.spokenName
+        }, language),
+        {
+          conversationLanguage: language
+        }
+      );
+    }
+
+    if (foundContacts.length > 1) {
+      return rememberPending(
+        {
+          type: "scheduleWhatsappContactChoice",
+          conversationLanguage: language,
+          spokenName: intent.spokenName,
+          message: intent.message,
+          sendAt: intent.sendAt,
+          contacts: foundContacts
+        },
+        whatsappChoicePrompt(intent.spokenName, foundContacts)
+      );
+    }
+
+    return rememberPending(
+      {
+        type: "scheduleWhatsapp",
+        conversationLanguage: language,
+        contact: foundContacts[0],
+        message: intent.message,
+        sendAt: intent.sendAt
+      },
+      readyScheduledWhatsappPrompt(
+        foundContacts[0],
+        intent.message,
+        intent.sendAt,
+        language
+      )
+    );
+  }
+
+  if (intent.type === "whatsapp") {
+    return rememberPending(
+      {
+        ...intent,
+        conversationLanguage: language
+      },
+      readyWhatsappPrompt(
+        intent.contact,
+        intent.message,
+        config.messageDelivery,
+        language
+      )
+    );
+  }
+
+  if (intent.type === "scheduleWhatsapp") {
+    return rememberPending(
+      {
+        ...intent,
+        conversationLanguage: language
+      },
+      readyScheduledWhatsappPrompt(
+        intent.contact,
+        intent.message,
+        intent.sendAt,
+        language
+      )
+    );
+  }
+
   if (intent.reply) {
     return intent;
   }
-  return executeIntent(intent, config);
+  return applyTurnConversationLanguage(
+    await executeIntent(intent, config),
+    rawText
+  );
 }
 
 function rememberCommandExchange(userText, assistantReply) {
@@ -3568,12 +7795,134 @@ function rememberCommandExchange(userText, assistantReply) {
   });
 }
 
+function writeStreamEvent(response, payload) {
+  response.write(`${JSON.stringify(payload)}\n`);
+}
+
+function streamableKnowledgeCandidate(rawText, metadata = {}) {
+  clearExpiredPending();
+  const config = readConfig();
+  if (state.pendingAction) {
+    return null;
+  }
+
+  const intent = handleIntent(rawText, config, metadata);
+  if (intent) {
+    return null;
+  }
+
+  const cleanText = stripWakeWords(rawText, config.assistantName);
+  if (!cleanText || looksLikeDeviceControlRequest(cleanText) || config.knowledge?.enabled === false) {
+    return null;
+  }
+
+  if (activeKnowledgeProvider(config) !== "openrouter") {
+    return null;
+  }
+
+  return {
+    config,
+    cleanText
+  };
+}
+
+async function streamCommandResponse(response, transcript, commandMetadata) {
+  const rawTranscript = String(commandMetadata.rawTranscript || transcript).trim() || transcript;
+  const streamCandidate = streamableKnowledgeCandidate(transcript, commandMetadata);
+
+  if (!streamCandidate) {
+    const result = applyTurnConversationLanguage(
+      await processCommand(transcript, commandMetadata),
+      rawTranscript
+    );
+    rememberCommandExchange(transcript, result.reply);
+    writeStreamEvent(response, {
+      type: "final",
+      payload: result
+    });
+    return;
+  }
+
+  writeStreamEvent(response, {
+    type: "meta",
+    conversationLanguage: effectiveConversationLanguage(rawTranscript),
+    mode: "knowledge_stream"
+  });
+
+  const result = applyTurnConversationLanguage(
+    await callOpenRouterKnowledgeStream(streamCandidate.cleanText, streamCandidate.config, {
+      onDelta: async (fullText) => {
+        writeStreamEvent(response, {
+          type: "delta",
+          text: fullText
+        });
+      }
+    }),
+    rawTranscript
+  );
+
+  rememberCommandExchange(transcript, result.reply);
+  writeStreamEvent(response, {
+    type: "final",
+    payload: result
+  });
+}
+
 const server = http.createServer(async (request, response) => {
   try {
     const requestUrl = new URL(request.url, `http://${request.headers.host}`);
+    if (isAgentMode()) {
+      setCorsHeaders(response, request.headers.origin || "*");
+      if (request.method === "OPTIONS") {
+        response.writeHead(204);
+        response.end();
+        return;
+      }
+    }
+
+    if (request.method === "GET" && requestUrl.pathname === "/api/status") {
+      sendJson(response, 200, publicStatus());
+      return;
+    }
 
     if (request.method === "GET" && requestUrl.pathname === "/api/config") {
       sendJson(response, 200, publicConfig(readConfig()));
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/command-stream") {
+      const body = await readBody(request);
+      const payload = body ? JSON.parse(body) : {};
+      const transcript = String(payload.transcript || "").trim();
+      if (!transcript) {
+        response.writeHead(400, {
+          "Content-Type": "application/x-ndjson; charset=utf-8",
+          "Cache-Control": "no-store",
+          Connection: "keep-alive"
+        });
+        writeStreamEvent(response, {
+          type: "final",
+          payload: createReply("I need a command first.")
+        });
+        response.end();
+        return;
+      }
+
+      const rawTranscript = String(payload.rawTranscript || transcript).trim() || transcript;
+      const commandMetadata = {
+        rawTranscript,
+        wakeMatched: Boolean(payload.wakeMatched),
+        inputSource: String(payload.inputSource || "unknown").trim() || "unknown"
+      };
+
+      response.writeHead(200, {
+        "Content-Type": "application/x-ndjson; charset=utf-8",
+        "Cache-Control": "no-store",
+        Connection: "keep-alive"
+      });
+
+      await streamCommandResponse(response, transcript, commandMetadata);
+      response.end();
       return;
     }
 
@@ -3585,8 +7934,17 @@ const server = http.createServer(async (request, response) => {
         sendJson(response, 400, createReply("I need a command first."));
         return;
       }
+      const rawTranscript = String(payload.rawTranscript || transcript).trim() || transcript;
+      const commandMetadata = {
+        rawTranscript,
+        wakeMatched: Boolean(payload.wakeMatched),
+        inputSource: String(payload.inputSource || "unknown").trim() || "unknown"
+      };
 
-      const result = await processCommand(transcript);
+      const result = applyTurnConversationLanguage(
+        await processCommand(transcript, commandMetadata),
+        rawTranscript
+      );
       rememberCommandExchange(transcript, result.reply);
       sendJson(response, 200, result);
       return;
@@ -3605,28 +7963,29 @@ const server = http.createServer(async (request, response) => {
       const payload = body ? JSON.parse(body) : {};
       const text = String(payload.text || "").trim();
       const voiceMode = payload.voiceMode === "male" ? "male" : "female";
+      const language =
+        normalizeConversationLanguage(payload.language) ||
+        detectScriptLanguage(text) ||
+        "english";
 
       if (!text) {
         sendJson(response, 400, { reply: "I need text to speak first." });
         return;
       }
 
-      if (state.kokoroStatus !== "ready") {
-        kickoffKokoroWarmup();
-        const statusNote =
-          state.kokoroStatus === "error" && state.kokoroLastError
-            ? `Kokoro is unavailable right now: ${state.kokoroLastError}`
-            : "Kokoro is still warming up on the server.";
+      const provider = ttsProviderForLanguage(language);
+      if (provider === "browser") {
         sendJson(response, 503, {
-          reply: `${statusNote} Falling back to browser speech is recommended for now.`,
-          status: state.kokoroStatus,
+          reply: `No server-side ${language} voice is available right now.`,
           fallbackProvider: "browser"
         });
         return;
       }
 
       try {
-        const audio = await enqueueSpeechJob(() => createSpeechAudio(text, voiceMode));
+        const audio = await enqueueSpeechJob(() =>
+          createSpeechAudio(text, voiceMode, language)
+        );
         response.writeHead(200, {
           "Content-Type": audio.contentType,
           "Cache-Control": "no-store",
@@ -3635,7 +7994,43 @@ const server = http.createServer(async (request, response) => {
         response.end(audio.buffer);
       } catch (error) {
         sendJson(response, 503, {
-          reply: `Kokoro speech failed: ${error.message}`
+          reply: `Speech generation failed: ${error.message}`
+        });
+      }
+      return;
+    }
+
+    if (request.method === "POST" && requestUrl.pathname === "/api/transcribe") {
+      if (!localSpeechRecognitionEnabled()) {
+        sendJson(response, 503, {
+          reply: "Local speech recognition is only available in the desktop app."
+        });
+        return;
+      }
+
+      const audioBuffer = await readBinaryBody(request);
+      const requestedLanguage =
+        normalizeConversationLanguage(request.headers["x-jarvis-language"]) || "auto";
+
+      if (!audioBuffer.length) {
+        sendJson(response, 400, {
+          reply: "I need microphone audio first."
+        });
+        return;
+      }
+
+      try {
+        const text = await enqueueTranscriptionJob(() =>
+          transcribeAudioBuffer(audioBuffer, requestedLanguage)
+        );
+        sendJson(response, 200, {
+          text,
+          language: requestedLanguage,
+          provider: speechRecognitionProviderForLanguage(requestedLanguage)
+        });
+      } catch (error) {
+        sendJson(response, 503, {
+          reply: `Voice recognition failed: ${error.message}`
         });
       }
       return;
@@ -3648,15 +8043,159 @@ const server = http.createServer(async (request, response) => {
 
     sendText(response, 405, "Method Not Allowed");
   } catch (error) {
+    if (response.headersSent) {
+      try {
+        writeStreamEvent(response, {
+          type: "final",
+          payload: createReply(`Something went wrong: ${error.message}`, {
+            status: "failed"
+          })
+        });
+      } catch (innerError) {
+        // Ignore secondary stream write failures.
+      }
+      response.end();
+      return;
+    }
+
     sendJson(response, 500, {
       reply: `Something went wrong: ${error.message}`
     });
   }
 });
 
-server.listen(PORT, HOST, () => {
-  const url = `http://${HOST}:${PORT}`;
-  console.log(`Jarvis local assistant running at ${url}`);
-});
+function serverLabel() {
+  const label =
+    APP_MODE === "agent"
+      ? "Jarvis local device agent"
+      : APP_MODE === "cloud"
+        ? "Jarvis cloud server"
+        : "Jarvis desktop assistant";
+  return label;
+}
 
-kickoffKokoroWarmup();
+function currentServerInfo(fallbackHost = HOST) {
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    return {
+      host: fallbackHost,
+      port: PORT,
+      url: `http://${fallbackHost}:${PORT}`
+    };
+  }
+
+  const host =
+    address.address === "::" || address.address === "0.0.0.0"
+      ? fallbackHost
+      : address.address;
+  return {
+    host,
+    port: address.port,
+    url: `http://${host}:${address.port}`
+  };
+}
+
+async function startServer(options = {}) {
+  const host = options.host || HOST;
+  const port =
+    typeof options.port === "number" && Number.isFinite(options.port)
+      ? options.port
+      : PORT;
+
+  await loadAssistantMemory();
+  await startScheduledMessageRunner();
+  kickoffKokoroWarmup();
+  kickoffSpeechRecognitionWarmup().catch(() => {});
+
+  if (server.listening) {
+    return Promise.resolve({
+      server,
+      ...currentServerInfo(host)
+    });
+  }
+
+  return new Promise((resolve, reject) => {
+    const handleError = (error) => {
+      server.off("listening", handleListening);
+      reject(error);
+    };
+
+    const handleListening = () => {
+      server.off("error", handleError);
+      resolve({
+        server,
+        ...currentServerInfo(host)
+      });
+    };
+
+    server.once("error", handleError);
+    server.once("listening", handleListening);
+    server.listen(port, host);
+  });
+}
+
+function stopServer() {
+  stopScheduledMessageRunner();
+  if (state.assistantMemoryPersistTimer) {
+    clearTimeout(state.assistantMemoryPersistTimer);
+    state.assistantMemoryPersistTimer = null;
+  }
+  if (state.assistantMemory) {
+    persistAssistantMemory().catch(() => {});
+  }
+  if (!server.listening) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve();
+    });
+  });
+}
+
+module.exports = {
+  startServer,
+  stopServer,
+  server
+};
+
+if (require.main === module) {
+  startServer()
+    .then((info) => {
+      const { url } = info;
+      const label = serverLabel();
+      if (typeof process.send === "function") {
+        process.send({
+          type: "server-ready",
+          ...info
+        });
+      }
+      console.log(`${label} running at ${url}`);
+    })
+    .catch((error) => {
+      if (typeof process.send === "function") {
+        process.send({
+          type: "server-error",
+          message: error.message
+        });
+      }
+      console.error(`Jarvis failed to start: ${error.message}`);
+      process.exitCode = 1;
+    });
+
+  const shutdown = () => {
+    stopServer()
+      .catch(() => {})
+      .finally(() => {
+        process.exit(0);
+      });
+  };
+
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+}
